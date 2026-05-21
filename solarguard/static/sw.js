@@ -6,7 +6,7 @@
 //  - /api/history, /api/decisions, /api/events -> network-only
 //    (tyhle můžou být velké, nepotřebujeme je offline)
 
-const VERSION = 'sg-v4.3.0-1';
+const VERSION = 'sg-v4.3.2-1';
 const STATIC_CACHE = `${VERSION}-static`;
 const STATE_CACHE = `${VERSION}-state`;
 

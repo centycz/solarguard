@@ -1,0 +1,194 @@
+# SolarGuard v4.3.x - konfigurace
+# Zkopiruj jako config.yaml a dopln sve hodnoty.
+
+general:
+  timezone: "Europe/Prague"
+  loop_interval_sec: 30
+  dry_run: false
+  log_level: "INFO"
+
+victron:
+  host: "10.0.0.X"          # IP adresa Cerbo GX
+  port: 1883
+  portal_id: "XXXXXXXXXXXX"  # portal ID z VRM (Cerbo GX -> Settings -> VRM)
+  keepalive_interval_sec: 30
+  stale_timeout_sec: 120
+
+loxone:
+  host: "10.0.0.X"           # IP adresa Loxone Miniserveru
+  username: "solarguard"
+  password: "TVOJE_HESLO"
+  poll_interval_sec: 60
+
+openmeteo:
+  latitude: 48.000           # tvoje GPS souradnice
+  longitude: 17.000
+  installed_kwp: 11.8        # instalovany vykon FVE v kWp
+  efficiency: 0.75
+  refresh_interval_sec: 14400
+
+planner:
+  battery_kwh_total: 32.0    # celkova kapacita baterie v kWh
+  battery_reserve_pct: 20.0
+  battery_round_trip_eff: 0.9
+  baseline_consumption_kwh: 12.0
+  aggressive_threshold_kwh: 15.0
+  normal_threshold_kwh: 8.0
+  conservative_threshold_kwh: 3.0
+  surplus_on_aggressive_w: 300
+  surplus_on_normal_w: 1500
+  surplus_on_conservative_w: 2500
+  surplus_off_ratio: 0.5
+  refresh_interval_sec: 300
+
+spa:
+  host: "10.0.0.X"           # IP adresa Intex virivky
+  surplus_on_w: 1500
+  surplus_off_w: 800
+  min_soc_pct: 20
+  target_temp_c: 38
+  max_temp_c: 40
+  stability_window_sec: 90
+  min_on_time_sec: 600
+  min_off_time_sec: 300
+  load_spike_threshold_w: 800
+  spike_cooldown_sec: 600
+  spike_safety_surplus_w: 500
+  spike_ignore_if_battery_charging_w: 1000
+  min_air_temp_c: 2
+  wind_reduce_kmh: 25.0
+  wind_target_reduction_c: 2
+  command_retry_count: 3
+  tub_volume_l: 1098.0       # objem virivky v litrech
+  heater_power_w: 2200.0
+  base_efficiency: 0.6
+  command_verify_delay_sec: 5
+  battery_full_soc_pct: 90.0
+  battery_full_off_threshold_w: -1500
+  bat_full_kickstart_enabled: true
+  bat_full_kickstart_min_pv_w: 500
+  bat_full_kickstart_min_load_w: 500
+  off_stability_window_sec: 60
+  phase_max_continuous_w: 3500
+  spa_phase_label: "L2"      # na ktere fazi je virivka (L1/L2/L3)
+  night_shutdown: true
+  night_shutdown_offset_min: 60
+  morning_resume_offset_min: 30
+
+cleaning:
+  default_duration_hours: 3
+  auto_stop: true
+  tick_interval_sec: 30
+
+appliances:
+  - id: washer
+    name: "Pračka"
+    emoji: "🧺"
+    peak_w: 2200
+    avg_w: 200
+    cycle_min: 180
+    phase: 1
+  - id: dryer
+    name: "Sušička"
+    emoji: "🌀"
+    peak_w: 800
+    avg_w: 600
+    cycle_min: 150
+    phase: 2
+
+logging:
+  log_dir: "/var/log/solarguard"
+  events_file: "events.jsonl"
+  app_file: "solarguard.log"
+
+api:
+  auth_enabled: false
+  token: "ZMENNAME-NA-DLOUHY-RANDOM-STRING-32-ZNAKU"
+  auth_read_too: false
+  allow_localhost: true
+
+influxdb:
+  enabled: false
+  url: "http://localhost:8086"
+  org: "home"
+  bucket: "solarguard"
+  token: "ZMENNAME-PRES-INFLUXDB-UI"
+  location_tag: "bojanovice"
+
+insights:
+  window_days: 14
+  min_baseline_days: 3
+
+digest:
+  slack_webhook: null
+  telegram_bot_token: null
+  telegram_chat_id: null
+
+schedule:
+  enabled: true
+  check_interval_sec: 30
+  rules:
+    - name: "Příklad: dopoledne gentle mode"
+      enabled: false
+      days: [Mo, Tu, We, Th, Fr]
+      time: "10:00"
+      scene: gentle
+      target_temp_c: 33
+
+spot_pricing:
+  enabled: true
+  eur_to_kc_fallback: 25.0
+  fee_kc_per_kwh: 1.5
+  refresh_interval_sec: 3600
+
+heatpump:
+  enabled: false
+  mac_address: "AABBCCDDEEFF"
+  default_hot_water_c: 50.0
+  boost_hot_water_c: 60.0
+  default_room_c: 21.0
+  boost_room_c: 22.5
+  cooling_room_c: 24.0
+  max_hot_water_c: 60
+  max_room_c: 23
+  min_room_c: 18
+  boost_min_surplus_w: 2000
+  boost_min_soc_pct: 80
+  boost_min_lux: 30000
+  boost_outdoor_max_c: 18
+  cooling_enabled: false
+  cooling_min_outdoor_c: 24
+  cooling_min_soc_pct: 70
+  night_saving_enabled: true
+  night_block_aux_heater: true
+  mqtt:
+    host: "127.0.0.1"
+    port: 1883
+    username: ""
+    password: ""
+    keepalive_minutes: 5
+  registers:
+    outdoor_temp:    "0001"
+    return_temp:     "0002"
+    supply_temp:     "0003"
+    hot_water_temp:  "0006"
+    room_temp:       "0008"
+    target_room_temp:    "0107"
+    target_supply_temp:  "0102"
+    target_hot_water:    "0006"
+    operating_mode:  "0200"
+    compressor:      "0100"
+    add_heater:      "0101"
+    block_add_heater: "0103"
+    fan_speed:       "0050"
+    power:           "0070"
+    energy_today:    "0080"
+    cop:             "0090"
+    alarm:           "0150"
+    alarm_code:      "0151"
+    heating_curve:   "0110"
+  writable:
+    target_hot_water:  "0006"
+    room_setpoint:     "0107"
+    operating_mode:    "0200"
+    block_add_heater:  "0103"

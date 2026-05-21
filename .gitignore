@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Runtime data (generováno za běhu)
+learned_profiles.json
+digest_history.jsonl
+events.jsonl
+solarguard.log
+tests/test_logic_report.html
+tests/test_appliances_report.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

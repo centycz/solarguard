@@ -1,0 +1,264 @@
+{
+  "annotations": {"list": []},
+  "description": "Denní energie, spot ceny, počasí, finanční metriky",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 2},
+              {"color": "orange", "value": 4},
+              {"color": "red", "value": 6}
+            ]
+          },
+          "unit": "currencyCZK"
+        }
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "value", "graphMode": "area", "justifyMode": "center",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"spot_price\" and r._field == \"price_kc_per_kwh\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Spot teď",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "kwatth"
+        }
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "colorMode": "value", "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: today()) |> filter(fn: (r) => r._measurement == \"energy_daily\" and r._field == \"pv_yield_kwh\") |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "FV výroba dnes",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+          "unit": "kwatth"
+        }
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {
+        "colorMode": "value", "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: today()) |> filter(fn: (r) => r._measurement == \"energy_daily\" and r._field == \"consumption_kwh\") |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "Spotřeba dnes",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "max": 50,
+          "min": -10,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "blue", "value": null},
+              {"color": "green", "value": 10},
+              {"color": "yellow", "value": 25},
+              {"color": "red", "value": 35}
+            ]
+          },
+          "unit": "celsius"
+        }
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: -10m) |> filter(fn: (r) => r._measurement == \"environment\" and r._field == \"air_temp_c\") |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "Teplota venku",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-GrYlRd"},
+          "custom": {
+            "axisLabel": "Kč/kWh", "axisPlacement": "auto",
+            "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "currencyCZK"
+        }
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 6},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["min", "max", "mean"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"spot_price\" and r._field == \"price_kc_per_kwh\") |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Spotová cena (hodinový průměr)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "line", "fillOpacity": 20, "lineInterpolation": "smooth",
+            "lineWidth": 2, "showPoints": "never", "spanNulls": true
+          },
+          "unit": "lux"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "id": 6,
+      "options": {
+        "legend": {"calcs": ["max", "mean"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"environment\" and r._field == \"light_lux\") |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Sluneční svit (Loxone)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "line", "fillOpacity": 20, "lineInterpolation": "smooth",
+            "lineWidth": 2, "showPoints": "never"
+          },
+          "unit": "celsius"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["min", "max", "mean"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"environment\" and r._field == \"air_temp_c\") |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Teplota venku v čase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1,
+            "showPoints": "never", "stacking": {"mode": "normal"}
+          },
+          "unit": "kwatth"
+        }
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["sum", "mean"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB}"},
+          "query": "from(bucket: \"solarguard\") |> range(start: v.timeRangeStart, stop: v.timeRangeStop) |> filter(fn: (r) => r._measurement == \"energy_daily\" and (r._field == \"pv_yield_kwh\" or r._field == \"consumption_kwh\")) |> aggregateWindow(every: 1d, fn: max, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Denní energie (FV vs Spotřeba)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["solarguard", "energy", "spot"],
+  "templating": {
+    "list": [
+      {
+        "current": {"text": "InfluxDB", "value": "InfluxDB"},
+        "hide": 0,
+        "label": "InfluxDB",
+        "name": "DS_INFLUXDB",
+        "options": [],
+        "query": "influxdb",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-7d", "to": "now"},
+  "title": "SolarGuard - Energy & Spot prices",
+  "uid": "solarguard-energy",
+  "version": 1
+}

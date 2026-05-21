@@ -1,0 +1,31 @@
+[Unit]
+Description=SolarGuard - solar surplus manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# v3.9 NEW: Type=notify pro systemd watchdog/READY signaling
+Type=notify
+NotifyAccess=main
+
+User=pi
+WorkingDirectory=/home/pi/solarguard
+ExecStart=/home/pi/solarguard/.venv/bin/python main.py config.yaml
+Restart=always
+RestartSec=10
+
+# v3.9 NEW: Watchdog - pokud SolarGuard nereaguje 90s, systemd ho restartne
+WatchdogSec=90s
+
+# v3.9 NEW: Burst protection - max 5 restartu za 5 minut
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+StandardOutput=journal
+StandardError=journal
+
+# v3.9 NEW: Resource limity (RPi 4 ma 4GB, dame mu max 512MB)
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+{
+  "name": "SolarGuard - Bojanovice",
+  "short_name": "SolarGuard",
+  "description": "Solar surplus manager pro vířivku a domácnost",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f3f5f8",
+  "theme_color": "#2563eb",
+  "lang": "cs-CZ",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Vířivka",
+      "short_name": "Vířivka",
+      "description": "Ovládání vířivky",
+      "url": "/?tab=control",
+      "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Toky energie",
+      "short_name": "Toky",
+      "description": "Real-time toky energie",
+      "url": "/?tab=flow",
+      "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Spotřebiče",
+      "short_name": "Spotřebiče",
+      "description": "Co teď můžu pustit?",
+      "url": "/?tab=appliances",
+      "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "categories": ["utilities", "productivity", "lifestyle"],
+  "prefer_related_applications": false
+}

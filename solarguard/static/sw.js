@@ -6,12 +6,13 @@
 //  - /api/history, /api/decisions, /api/events -> network-only
 //    (tyhle můžou být velké, nepotřebujeme je offline)
 
-const VERSION = 'sg-v4.3.2-1';
+const VERSION = 'sg-v4.3.2-2';
 const STATIC_CACHE = `${VERSION}-static`;
 const STATE_CACHE = `${VERSION}-state`;
 
+// HTML root NENI v pre-cache - vzdy se fetchuje ze site (network-first)
+// Aby se po kazdem git pull zobrazila nova verze bez potreby cache clearingu.
 const STATIC_ASSETS = [
-  '/',
   '/static/manifest.json',
   '/static/icon.svg',
   '/static/icon-180.png',
@@ -60,7 +61,13 @@ self.addEventListener('fetch', (event) => {
     return; // browser default
   }
 
-  // Statické a HTML root - cache-first
+  // HTML root - network-first (vždy čerstvá verze stránky)
+  if (url.pathname === '/' || url.pathname === '') {
+    event.respondWith(networkFirstWithCache(request, STATIC_CACHE));
+    return;
+  }
+
+  // Ostatní statické assety (ikony, manifest) - cache-first
   event.respondWith(cacheFirst(request, STATIC_CACHE));
 });
 

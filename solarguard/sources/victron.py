@@ -45,8 +45,8 @@ BATTERY_INSTANCE = 512
 BATTERY_CELL_V_PREFIX = f"battery/{BATTERY_INSTANCE}/Voltages/"
 BATTERY_MIN_CELL_V = f"battery/{BATTERY_INSTANCE}/System/MinCellVoltage"
 BATTERY_MAX_CELL_V = f"battery/{BATTERY_INSTANCE}/System/MaxCellVoltage"
-BATTERY_MIN_CELL_ID = f"battery/{BATTERY_INSTANCE}/System/MinCellVoltageId"
-BATTERY_MAX_CELL_ID = f"battery/{BATTERY_INSTANCE}/System/MaxCellVoltageId"
+BATTERY_MIN_CELL_ID = f"battery/{BATTERY_INSTANCE}/System/MinVoltageCellId"
+BATTERY_MAX_CELL_ID = f"battery/{BATTERY_INSTANCE}/System/MaxVoltageCellId"
 
 
 class VictronMQTT:
@@ -171,10 +171,10 @@ class VictronMQTT:
                 self.ctx.victron.max_cell_voltage_v = float(value)
                 return
             if suffix == BATTERY_MIN_CELL_ID:
-                self.ctx.victron.min_cell_id = int(value)
+                self.ctx.victron.min_cell_id = str(value)
                 return
             if suffix == BATTERY_MAX_CELL_ID:
-                self.ctx.victron.max_cell_id = int(value)
+                self.ctx.victron.max_cell_id = str(value)
                 return
 
         except Exception as e:

@@ -55,8 +55,8 @@ class VictronData:
     cell_voltages: dict = field(default_factory=dict)
     min_cell_voltage_v: Optional[float] = None
     max_cell_voltage_v: Optional[float] = None
-    min_cell_id: Optional[int] = None   # cislo clanku s nejnizsim napetim
-    max_cell_id: Optional[int] = None   # cislo clanku s nejvyssim napetim
+    min_cell_id: Optional[str] = None   # ID packu/clanku s nejnizsim napetim (napr. "Pack-01#")
+    max_cell_id: Optional[str] = None   # ID packu/clanku s nejvyssim napetim
 
     @property
     def grid_total_w(self) -> Optional[float]:

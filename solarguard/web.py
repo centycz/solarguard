@@ -5122,7 +5122,34 @@ function renderEngineStatus(es) {
     const ba = es.battery;
     const cells = ba.cell_voltages || [];
     if (cells.length === 0) {
-      cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:24px;">BMS neposílá napětí jednotlivých článků. Cerbo GX musí mít BMS připojené přes VE.Can nebo VE.Direct s podporou cell reporting.</div>';
+      // Individualni clanky nejsou - zobrazi alespon min/max z BMS (Pylontech pres VE.Can)
+      const minV = ba.min_cell_voltage_v;
+      const maxV = ba.max_cell_voltage_v;
+      if (minV == null && maxV == null) {
+        cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:24px;">Čekám na data z BMS…</div>';
+      } else {
+        const spread = (minV != null && maxV != null) ? maxV - minV : null;
+        const spreadMs = spread != null ? Math.round(spread * 1000) : null;
+        const spreadColor = spread == null ? 'var(--text-muted)' : (spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)'));
+        const spreadNote = spread == null ? '' : (spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK'));
+        cellsDiv.innerHTML = `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+            <div style="background:var(--surface);border:2px solid var(--primary);border-radius:10px;padding:14px;text-align:center;">
+              <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MIN NAPĚTÍ</div>
+              <div style="font-size:22px;font-weight:700;color:var(--primary);font-family:var(--mono)">${minV != null ? minV.toFixed(3) : '—'} <span style="font-size:14px">V</span></div>
+              ${ba.min_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.min_cell_id + '</div>' : ''}
+            </div>
+            <div style="background:var(--surface);border:2px solid var(--success);border-radius:10px;padding:14px;text-align:center;">
+              <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MAX NAPĚTÍ</div>
+              <div style="font-size:22px;font-weight:700;color:var(--success);font-family:var(--mono)">${maxV != null ? maxV.toFixed(3) : '—'} <span style="font-size:14px">V</span></div>
+              ${ba.max_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.max_cell_id + '</div>' : ''}
+            </div>
+          </div>
+          ${spread != null ? `<div style="text-align:center;margin-bottom:12px;font-size:13px;">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></div>` : ''}
+          <div style="padding:10px 12px;background:var(--surface);border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.6;">
+            ℹ Baterie přes VE.Can (Pylontech / LiFePO4 stack) — Cerbo GX posílá pouze min/max napětí celého racku, ne jednotlivé články. Spread pod 50 mV = výborná vyrovnanost.
+          </div>`;
+      }
     } else {
       const voltages = cells.map(c => c.v);
       const minV = ba.min_cell_voltage_v != null ? ba.min_cell_voltage_v : Math.min(...voltages);

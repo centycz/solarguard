@@ -1,19 +1,11 @@
 """
 Seplos BMS V3.0 - RS485 Modbus RTU driver.
 
-Cte napeti vsech clanku, teploty a souhrnna data z kazdeho pack pres USB-RS485.
-Seplos V3.0 pouziva standardni Modbus RTU (9600 8N1).
+Seplos BMS broadcastuje Modbus RTU rámce kontinuálně na 19200 baud.
+Rámec pro pack N: {N} 04 {byte_count} [data] [CRC2]
+Kde data = 16 napětí článků (mV) + 4 teploty (0.1K) + souhrn packu.
 
-Zapojeni: USB-RS485 adaptér -> RS485 port na Seplos BMS (spodni konektor).
-Vice pack: vsechny jsou na jedne sbernici, adresovane 0x01, 0x02, ...
-
-Register mapa (FC=0x04, Input Registers):
-  0x1100 + n  : napeti clanku n (n=0..15), jednotka: 1 mV
-  0x1110..13  : teploty 4 cidel, jednotka: 0.1 K  (prepocet: (raw-2731)/10 = °C)
-  0x1120      : celkove napeti packu, 0.01 V
-  0x1121      : proud signed int16, 0.01 A (kladne = nabijeni)
-  0x1122      : SOC, 0.1 %
-  0x1123      : SOH, 0.1 %
+Zapojení: USB-RS485 adaptér -> RS485 port na Seplos BMS.
 """
 from __future__ import annotations
 
@@ -27,13 +19,8 @@ from ..state import SystemContext
 
 log = logging.getLogger("seplos")
 
-# Vychozi register adresy (Seplos V3.0 dokumentace + komunita)
-REG_CELL_V_START = 0x1100
-REG_TEMPS_START  = 0x1110
-REG_PACK_SUMMARY = 0x1120   # voltage, current, SOC, SOH
-TEMPS_COUNT      = 4
-SUMMARY_COUNT    = 4
-
+# Počet extra registrů za články: 4 teploty + voltage + current + SOC + SOH + 2 rezerva
+EXTRA_REGS = 10
 
 def _crc16(data: bytes) -> bytes:
     crc = 0xFFFF
@@ -51,9 +38,9 @@ class SeplosRS485:
         pack_count: int,
         cells_per_pack: int,
         context: SystemContext,
-        baudrate: int = 9600,
+        baudrate: int = 19200,
         poll_interval_sec: int = 30,
-        reg_cell_start: int = REG_CELL_V_START,
+        reg_cell_start: int = 0x1100,
     ):
         self.port = port
         self.pack_count = pack_count
@@ -65,72 +52,106 @@ class SeplosRS485:
         self._ser = None
         self._task: Optional[asyncio.Task] = None
 
-    # ── Modbus RTU low-level ─────────────────────────────────────────────────
+        # Počet registrů na pack a velikost Modbus rámce
+        self._reg_count = cells_per_pack + EXTRA_REGS
+        self._data_bytes = self._reg_count * 2
+        self._frame_size = 3 + self._data_bytes + 2  # header + data + CRC
+
+    # ── Sériový port ────────────────────────────────────────────────────────
 
     def _open(self):
         import serial
         self._ser = serial.Serial(
             self.port, self.baudrate,
             bytesize=8, parity='N', stopbits=1,
-            timeout=1.0,
+            timeout=0.1,
         )
         log.info(f"Seplos RS485 otevren: {self.port} @ {self.baudrate} baud")
 
-    def _read_input_regs(self, addr: int, start: int, count: int) -> Optional[List[int]]:
-        """Modbus RTU FC=0x04 read input registers."""
-        req = struct.pack('>BBHH', addr, 0x04, start, count)
+    # ── Čtení jednoho packu ─────────────────────────────────────────────────
+
+    def _read_pack(self, pack_addr: int) -> Optional[dict]:
+        """
+        Pošle Modbus dotaz a v příchozím streamu najde validní rámec pro daný pack.
+        BMS broadcastuje rámce kontinuálně — hledáme vzor: {addr} 04 {byte_count}.
+        """
+        req = struct.pack('>BBHH', pack_addr, 0x04, self.reg_cell_start, self._reg_count)
         req += _crc16(req)
+
+        # Trigger dotazem (BMS někdy odpovídá rychleji po dotazu)
         try:
             self._ser.reset_input_buffer()
             self._ser.write(req)
-            expected = 3 + count * 2 + 2
-            resp = self._ser.read(expected)
         except Exception as e:
-            log.error(f"serial chyba: {e}")
+            log.error(f"serial write error: {e}")
             return None
 
-        if len(resp) < 3 + count * 2 + 2:
-            log.warning(f"kratka odpoved: {len(resp)}B od addr {addr:#04x}, start={start:#06x}")
-            return None
-        if resp[0] != addr or resp[1] != 0x04:
-            log.warning(f"neocekavana odpoved: {resp[:3].hex()} (addr={addr:#04x})")
-            return None
-        if _crc16(resp[:-2]) != resp[-2:]:
-            log.warning("CRC chyba v odpovedi")
-            return None
+        # Hledáme rámec v streamu po dobu 1.5 sekundy
+        target = bytes([pack_addr, 0x04, self._data_bytes])
+        buf = b''
+        deadline = time.time() + 1.5
 
-        return [struct.unpack_from('>H', resp, 3 + i * 2)[0] for i in range(count)]
+        while time.time() < deadline:
+            try:
+                chunk = self._ser.read(self._frame_size + 64)
+            except Exception as e:
+                log.error(f"serial read error: {e}")
+                return None
 
-    # ── Pack reading ─────────────────────────────────────────────────────────
+            if chunk:
+                buf += chunk
 
-    def _read_pack(self, pack_addr: int) -> Optional[dict]:
-        # 1. Napeti clanku
-        cell_regs = self._read_input_regs(pack_addr, self.reg_cell_start, self.cells_per_pack)
-        if cell_regs is None:
-            return None
-        cell_voltages = [v / 1000.0 for v in cell_regs]   # mV -> V
+            # Hledej platný Modbus rámec
+            pos = 0
+            while pos <= len(buf) - self._frame_size:
+                idx = buf.find(target, pos)
+                if idx < 0:
+                    break
+                frame = buf[idx:idx + self._frame_size]
+                if len(frame) == self._frame_size:
+                    if _crc16(frame[:-2]) == frame[-2:]:
+                        log.debug(f"Pack {pack_addr}: platný rámec nalezen na offset {idx}")
+                        return self._parse_frame_data(frame[3:-2])
+                pos = idx + 1
 
-        # 2. Teploty (4 cidla, 0.1 K -> °C)
-        temp_regs = self._read_input_regs(pack_addr, REG_TEMPS_START, TEMPS_COUNT)
+            # Udržuj buffer rozumné velikosti
+            if len(buf) > 512:
+                buf = buf[-256:]
+
+        log.warning(f"Pack {pack_addr:#04x}: rámec nenalezen do timeoutu")
+        return None
+
+    def _parse_frame_data(self, data: bytes) -> dict:
+        """Parsuje 52 bytů dat z Modbus rámce."""
+        # Napětí článků: prvních cells_per_pack × 2 bytů, jednotka mV
+        cell_voltages = [
+            struct.unpack_from('>H', data, i * 2)[0] / 1000.0
+            for i in range(self.cells_per_pack)
+        ]
+
+        # Teploty: 4 senzory, 0.1K (offset 2731 = 273.1K = 0°C)
+        t_off = self.cells_per_pack * 2
         temperatures = []
-        if temp_regs:
-            for raw in temp_regs:
-                if raw > 0:
-                    temperatures.append(round((raw - 2731) / 10.0, 1))
+        for i in range(4):
+            raw = struct.unpack_from('>H', data, t_off + i * 2)[0]
+            if raw > 2731:
+                temperatures.append(round((raw - 2731) / 10.0, 1))
 
-        # 3. Souhrnne hodnoty packu
-        summary = self._read_input_regs(pack_addr, REG_PACK_SUMMARY, SUMMARY_COUNT)
-        pack_voltage = summary[0] / 100.0 if summary else None
-
+        # Souhrn packu
+        s_off = t_off + 4 * 2
+        pack_voltage = None
         current = None
-        if summary and len(summary) > 1:
-            raw = summary[1]
-            if raw > 32767:
-                raw -= 65536          # signed int16
-            current = raw / 100.0
+        soc = None
+        soh = None
 
-        soc = summary[2] / 10.0 if summary and len(summary) > 2 else None
-        soh = summary[3] / 10.0 if summary and len(summary) > 3 else None
+        if len(data) >= s_off + 8:
+            pack_voltage = struct.unpack_from('>H', data, s_off)[0] / 100.0
+            cur_raw = struct.unpack_from('>H', data, s_off + 2)[0]
+            if cur_raw > 32767:
+                cur_raw -= 65536
+            current = cur_raw / 100.0
+            soc = struct.unpack_from('>H', data, s_off + 4)[0] / 10.0
+            soh = struct.unpack_from('>H', data, s_off + 6)[0] / 10.0
 
         return {
             'cell_voltages': cell_voltages,
@@ -156,7 +177,7 @@ class SeplosRS485:
         ok = 0
 
         for i in range(self.pack_count):
-            addr = i + 1    # pack 1 = 0x01, pack 2 = 0x02, ...
+            addr = i + 1
             result = self._read_pack(addr)
             if result:
                 pack_cells.append(result['cell_voltages'])
@@ -167,7 +188,6 @@ class SeplosRS485:
                 pack_soh.append(result.get('soh'))
                 ok += 1
             else:
-                log.warning(f"Pack {i+1} (addr {addr:#04x}) neodpovedel")
                 pack_cells.append([])
                 pack_temps.append([])
                 pack_v.append(None); pack_cur.append(None)
@@ -183,7 +203,7 @@ class SeplosRS485:
         s.online = ok > 0
         s.last_update = time.time()
 
-        # Agregat min/max
+        # Agregovaný min/max přes všechny packy
         flat = [
             (pi, ci, v)
             for pi, cells in enumerate(pack_cells)
@@ -195,13 +215,13 @@ class SeplosRS485:
             mx = max(flat, key=lambda x: x[2])
             s.min_cell_voltage = mn[2]
             s.max_cell_voltage = mx[2]
-            s.min_cell_pack    = mn[0] + 1
-            s.min_cell_index   = mn[1] + 1
-            s.max_cell_pack    = mx[0] + 1
-            s.max_cell_index   = mx[1] + 1
+            s.min_cell_pack  = mn[0] + 1
+            s.min_cell_index = mn[1] + 1
+            s.max_cell_pack  = mx[0] + 1
+            s.max_cell_index = mx[1] + 1
             spread_mv = (mx[2] - mn[2]) * 1000
             log.info(
-                f"Seplos {ok}/{self.pack_count} pack | "
+                f"Seplos {ok}/{self.pack_count} pack OK | "
                 f"min={mn[2]:.3f}V (P{mn[0]+1}C{mn[1]+1}) "
                 f"max={mx[2]:.3f}V (P{mx[0]+1}C{mx[1]+1}) "
                 f"spread={spread_mv:.0f}mV"
@@ -221,9 +241,9 @@ class SeplosRS485:
 
     async def start(self):
         log.info(
-            f"Seplos RS485 starting: port={self.port} "
-            f"{self.pack_count} pack x {self.cells_per_pack}S "
-            f"poll={self.poll_interval}s"
+            f"Seplos RS485 starting: port={self.port} baud={self.baudrate} "
+            f"{self.pack_count} pack × {self.cells_per_pack}S "
+            f"frame={self._frame_size}B poll={self.poll_interval}s"
         )
         self._task = asyncio.create_task(self._loop())
 

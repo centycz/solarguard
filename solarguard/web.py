@@ -3840,24 +3840,30 @@ async function startCleaning(hours) {
   await apiPost('/api/spa/cleaning/start', {hours: hours});
 }
 
+function _showErr(msg) {
+  let eb = document.getElementById('_jsErr');
+  if (!eb) { eb = document.createElement('div'); eb.id='_jsErr'; eb.style.cssText='position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:12px;z-index:9999;font:12px monospace;white-space:pre-wrap;cursor:pointer'; eb.onclick=()=>eb.remove(); document.body.prepend(eb); }
+  eb.textContent = 'CHYBA: ' + msg;
+}
+
 async function refresh() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
     lastState = s;
-    // NEW v3.3: pokud SW vratil stale data, ukaz banner
     if (s._stale) {
       updateOfflineBanner(true, false, s._stale_age_sec);
     } else {
       updateOfflineBanner(false, false);
     }
-    renderHeader(s);
-    renderControl(s);
+    try { renderHeader(s); } catch(e) { _showErr('renderHeader: '+e.message); return; }
+    try { renderControl(s); } catch(e) { _showErr('renderControl: '+e.message); return; }
     // v3.7: heating prediction (jen na control tabu)
     if (activeTab === 'control') {
       updateHeatingPrediction();
     }
     if (activeTab === 'overview') {
-      renderPlan(s); renderOverview(s);
+      try { renderPlan(s); } catch(e) { _showErr('renderPlan: '+e.message); return; }
+      try { renderOverview(s); } catch(e) { _showErr('renderOverview: '+e.message); return; }
       const h = await fetch('/api/history').then(r => r.json());
       renderChart(h.ticks);
       // v4.0 NEW: insights

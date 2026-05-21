@@ -5158,12 +5158,13 @@ function renderEngineStatus(es) {
     ph.innerHTML = phasesHtml;
   }
 
-  // v4.3.2: cell voltage panel - preferuje Seplos RS485, fallback na MQTT min/max
+  // v4.3.2: cell voltage panel - Seplos RS485 (bezpecne wrap, aby pripadna chyba nezablokovala zbytek)
+  try {
   const cellsDiv = document.getElementById('cellsPanel');
-  if (!cellsDiv) return;
+  if (!cellsDiv) throw new Error('no cellsPanel');
 
   const sep = es.seplos;
-  const ba  = es.battery;
+  const ba  = es.battery || {};
 
   // ── Seplos RS485 data k dispozici? ──────────────────────────────────────
   if (sep && sep.enabled && sep.online && sep.all_cells && sep.all_cells.length > 0) {
@@ -5259,6 +5260,7 @@ function renderEngineStatus(es) {
         </div>`;
     }
   }
+  } catch(e) { console.warn('cellsPanel render error:', e); }
 }
 
 // v4.3.0 NEW: filter chips state

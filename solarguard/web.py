@@ -92,6 +92,31 @@ def set_learning_manager(lm):
     global _learning_manager; _learning_manager = lm
 
 
+def _seplos_json(s) -> dict:
+    """Serializuje SeplosData pro JSON API."""
+    if s is None:
+        return {"enabled": False}
+    flat = s.all_cells_flat if hasattr(s, 'all_cells_flat') else []
+    return {
+        "enabled": True,
+        "online": s.online,
+        "stale": s.is_stale if hasattr(s, 'is_stale') else True,
+        "pack_count": len(s.pack_cell_voltages),
+        "cells_per_pack": len(s.pack_cell_voltages[0]) if s.pack_cell_voltages else 0,
+        "all_cells": flat,
+        "pack_voltages": s.pack_voltages,
+        "pack_currents": s.pack_currents,
+        "pack_soc": s.pack_soc,
+        "pack_temperatures": s.pack_temperatures,
+        "min_cell_voltage": s.min_cell_voltage,
+        "max_cell_voltage": s.max_cell_voltage,
+        "min_cell_pack": s.min_cell_pack,
+        "min_cell_index": s.min_cell_index,
+        "max_cell_pack": s.max_cell_pack,
+        "max_cell_index": s.max_cell_index,
+    }
+
+
 def record_tick(ctx: SystemContext, decision_reason: str = "") -> None:
     v = ctx.victron; s = ctx.spa; e = ctx.env; p = ctx.plan; c = ctx.cleaning
     tick_history.append({
@@ -205,13 +230,14 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
                 "battery_in_today_kwh": v.battery_in_today_kwh,
                 "pv_yield_yesterday_kwh": v.pv_yield_yesterday_kwh,
                 "consumption_yesterday_kwh": v.consumption_yesterday_kwh,
-                # v4.3.1 NEW: cell voltages
+                # v4.3.1: min/max z MQTT (Cerbo GX CAN agregat)
                 "cell_voltages": [{"num": n, "v": round(volt, 4)} for n, volt in sorted(v.cell_voltages.items())],
                 "min_cell_voltage_v": v.min_cell_voltage_v,
                 "max_cell_voltage_v": v.max_cell_voltage_v,
                 "min_cell_id": v.min_cell_id,
                 "max_cell_id": v.max_cell_id,
             },
+            "seplos": _seplos_json(ctx.seplos),
             "spa": {
                 "current_temp": s.current_temp_c, "target_temp": s.target_temp_c,
                 "heater": s.heater_on, "filter": s.filter_on,
@@ -438,13 +464,14 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
                 "battery_full_pct": battery_full_pct,
                 "is_battery_full": battery_full,
                 "is_under_min": v.soc_pct is not None and v.soc_pct < cfg.get("min_soc_pct", 20),
-                # v4.3.1 NEW: cell voltages pro Napeti clanku panel
+                # v4.3.1: min/max z MQTT (Cerbo GX)
                 "cell_voltages": [{"num": n, "v": round(volt, 4)} for n, volt in sorted(v.cell_voltages.items())],
                 "min_cell_voltage_v": v.min_cell_voltage_v,
                 "max_cell_voltage_v": v.max_cell_voltage_v,
                 "min_cell_id": v.min_cell_id,
                 "max_cell_id": v.max_cell_id,
             },
+            "seplos": _seplos_json(ctx.seplos),
             "spa": {
                 "online": s.online,
                 "current_temp_c": s.current_temp_c,
@@ -5116,76 +5143,105 @@ function renderEngineStatus(es) {
     ph.innerHTML = phasesHtml;
   }
 
-  // v4.3.1 NEW: cell voltage panel
+  // v4.3.2: cell voltage panel - preferuje Seplos RS485, fallback na MQTT min/max
   const cellsDiv = document.getElementById('cellsPanel');
-  if (cellsDiv && es.battery) {
-    const ba = es.battery;
-    const cells = ba.cell_voltages || [];
-    if (cells.length === 0) {
-      // Individualni clanky nejsou - zobrazi alespon min/max z BMS (Pylontech pres VE.Can)
-      const minV = ba.min_cell_voltage_v;
-      const maxV = ba.max_cell_voltage_v;
-      if (minV == null && maxV == null) {
-        cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:24px;">Čekám na data z BMS…</div>';
-      } else {
-        const spread = (minV != null && maxV != null) ? maxV - minV : null;
-        const spreadMs = spread != null ? Math.round(spread * 1000) : null;
-        const spreadColor = spread == null ? 'var(--text-muted)' : (spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)'));
-        const spreadNote = spread == null ? '' : (spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK'));
-        cellsDiv.innerHTML = `
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
-            <div style="background:var(--surface);border:2px solid var(--primary);border-radius:10px;padding:14px;text-align:center;">
-              <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MIN NAPĚTÍ</div>
-              <div style="font-size:22px;font-weight:700;color:var(--primary);font-family:var(--mono)">${minV != null ? minV.toFixed(3) : '—'} <span style="font-size:14px">V</span></div>
-              ${ba.min_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.min_cell_id + '</div>' : ''}
-            </div>
-            <div style="background:var(--surface);border:2px solid var(--success);border-radius:10px;padding:14px;text-align:center;">
-              <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MAX NAPĚTÍ</div>
-              <div style="font-size:22px;font-weight:700;color:var(--success);font-family:var(--mono)">${maxV != null ? maxV.toFixed(3) : '—'} <span style="font-size:14px">V</span></div>
-              ${ba.max_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.max_cell_id + '</div>' : ''}
-            </div>
-          </div>
-          ${spread != null ? `<div style="text-align:center;margin-bottom:12px;font-size:13px;">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></div>` : ''}
-          <div style="padding:10px 12px;background:var(--surface);border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.6;">
-            ℹ Baterie přes VE.Can (Pylontech / LiFePO4 stack) — Cerbo GX posílá pouze min/max napětí celého racku, ne jednotlivé články. Spread pod 50 mV = výborná vyrovnanost.
-          </div>`;
-      }
-    } else {
-      const voltages = cells.map(c => c.v);
-      const minV = ba.min_cell_voltage_v != null ? ba.min_cell_voltage_v : Math.min(...voltages);
-      const maxV = ba.max_cell_voltage_v != null ? ba.max_cell_voltage_v : Math.max(...voltages);
-      const spread = maxV - minV;
-      const spreadMs = Math.round(spread * 1000);
-      const spreadColor = spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)');
-      const spreadNote = spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK');
-      const cellColor = v => v < 3.0 ? 'var(--danger)' : (v > 3.60 ? 'var(--warning)' : 'var(--success)');
+  if (!cellsDiv) return;
 
-      let html = `<div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
-        <span style="font-size:12px;color:var(--text-muted)">${cells.length} článků</span>
-        <span style="font-size:12px">min: <strong style="color:var(--primary);font-family:var(--mono)">${minV.toFixed(3)} V</strong></span>
-        <span style="font-size:12px">max: <strong style="color:var(--success);font-family:var(--mono)">${maxV.toFixed(3)} V</strong></span>
-        <span style="font-size:12px">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></span>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:8px;">`;
+  const sep = es.seplos;
+  const ba  = es.battery;
 
-      cells.forEach(c => {
-        const isMin = ba.min_cell_id != null ? c.num === ba.min_cell_id : Math.abs(c.v - minV) < 0.0005;
-        const isMax = ba.max_cell_id != null ? c.num === ba.max_cell_id : Math.abs(c.v - maxV) < 0.0005;
+  // ── Seplos RS485 data k dispozici? ──────────────────────────────────────
+  if (sep && sep.enabled && sep.online && sep.all_cells && sep.all_cells.length > 0) {
+    const cells = sep.all_cells;
+    const minV  = sep.min_cell_voltage;
+    const maxV  = sep.max_cell_voltage;
+    const spread = maxV - minV;
+    const spreadMs = Math.round(spread * 1000);
+    const spreadColor = spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)');
+    const spreadNote  = spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK');
+    const cellColor = v => v < 3.0 ? 'var(--danger)' : (v > 3.55 ? 'var(--warning)' : 'var(--success)');
+
+    // Souhrnny radek
+    let html = `<div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
+      <span style="font-size:11px;background:rgba(34,197,94,.15);color:var(--success);padding:2px 8px;border-radius:20px;font-weight:600;">RS485 live</span>
+      <span style="font-size:12px;color:var(--text-muted)">${sep.pack_count} × ${sep.cells_per_pack}S = ${cells.length} článků</span>
+      <span style="font-size:12px">min: <strong style="color:var(--primary);font-family:var(--mono)">${minV.toFixed(3)} V</strong> <span style="font-size:10px;color:var(--text-muted)">(P${sep.min_cell_pack}C${sep.min_cell_index})</span></span>
+      <span style="font-size:12px">max: <strong style="color:var(--success);font-family:var(--mono)">${maxV.toFixed(3)} V</strong> <span style="font-size:10px;color:var(--text-muted)">(P${sep.max_cell_pack}C${sep.max_cell_index})</span></span>
+      <span style="font-size:12px">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></span>
+    </div>`;
+
+    // Grid clanku - seskupene po packach
+    const packCount = sep.pack_count;
+    for (let pi = 0; pi < packCount; pi++) {
+      const packCells = cells.filter(c => c.pack === pi + 1);
+      if (!packCells.length) continue;
+
+      // Info o packu: napeti, proud, SOC
+      const pv  = sep.pack_voltages  && sep.pack_voltages[pi]  != null ? sep.pack_voltages[pi].toFixed(2)  + ' V'  : '—';
+      const pc  = sep.pack_currents  && sep.pack_currents[pi]  != null ? sep.pack_currents[pi].toFixed(1)  + ' A'  : '—';
+      const ps  = sep.pack_soc       && sep.pack_soc[pi]       != null ? sep.pack_soc[pi].toFixed(0)       + ' %'  : '—';
+      const temps = sep.pack_temperatures && sep.pack_temperatures[pi] || [];
+      const tempStr = temps.length ? temps.map(t => t.toFixed(1) + '°').join(' / ') : '—';
+
+      html += `<div style="margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
+          <span style="font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:1.5px;">PACK ${pi+1}</span>
+          <span style="font-size:11px;font-family:var(--mono);color:var(--text-muted)">${pv} · ${pc} · SOC ${ps} · 🌡 ${tempStr}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(68px,1fr));gap:6px;">`;
+
+      packCells.forEach(c => {
+        const isMin = c.pack === sep.min_cell_pack && c.cell === sep.min_cell_index;
+        const isMax = c.pack === sep.max_cell_pack && c.cell === sep.max_cell_index;
         const border = isMin ? '2px solid var(--primary)' : (isMax ? '2px solid var(--success)' : '1px solid var(--border)');
-        const badge = isMin
-          ? '<div style="font-size:9px;color:var(--primary);font-weight:700;letter-spacing:.5px;margin-top:2px">MIN</div>'
+        const badge  = isMin
+          ? '<div style="font-size:9px;color:var(--primary);font-weight:700;letter-spacing:.5px;margin-top:1px">MIN</div>'
           : (isMax
-            ? '<div style="font-size:9px;color:var(--success);font-weight:700;letter-spacing:.5px;margin-top:2px">MAX</div>'
+            ? '<div style="font-size:9px;color:var(--success);font-weight:700;letter-spacing:.5px;margin-top:1px">MAX</div>'
             : '<div style="font-size:9px;opacity:0">·</div>');
-        html += `<div style="background:var(--surface);border:${border};border-radius:8px;padding:8px 4px;text-align:center;">
-          <div style="font-size:9px;color:var(--text-muted);letter-spacing:1px;margin-bottom:3px">C${c.num}</div>
-          <div style="font-size:13px;font-weight:700;color:${cellColor(c.v)};font-family:var(--mono)">${c.v.toFixed(3)}</div>
+        html += `<div style="background:var(--surface);border:${border};border-radius:7px;padding:6px 3px;text-align:center;">
+          <div style="font-size:9px;color:var(--text-muted);letter-spacing:.8px;margin-bottom:2px">C${c.cell}</div>
+          <div style="font-size:12px;font-weight:700;color:${cellColor(c.v)};font-family:var(--mono)">${c.v.toFixed(3)}</div>
           ${badge}
         </div>`;
       });
 
-      html += '</div>';
-      cellsDiv.innerHTML = html;
+      html += '</div></div>';
+    }
+
+    cellsDiv.innerHTML = html;
+
+  // ── Fallback: pouze MQTT min/max z Cerbo GX ─────────────────────────────
+  } else {
+    const minV = ba && ba.min_cell_voltage_v;
+    const maxV = ba && ba.max_cell_voltage_v;
+
+    if (sep && sep.enabled && !sep.online) {
+      cellsDiv.innerHTML = '<div style="color:var(--warning);text-align:center;padding:20px;">⚠ Seplos RS485 nakonfigurován, ale neodpovídá. Zkontroluj port a zapojení.</div>';
+    } else if (minV == null) {
+      cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:20px;">Čekám na data z BMS…<br><span style="font-size:11px;margin-top:6px;display:block;">Pro napětí všech článků zapoj USB-RS485 do RPi a nastav <code>seplos.enabled: true</code> v config.yaml</span></div>';
+    } else {
+      const spread = maxV - minV;
+      const spreadMs = Math.round(spread * 1000);
+      const spreadColor = spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)');
+      const spreadNote  = spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK');
+      cellsDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+          <div style="background:var(--surface);border:2px solid var(--primary);border-radius:10px;padding:14px;text-align:center;">
+            <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MIN NAPĚTÍ</div>
+            <div style="font-size:22px;font-weight:700;color:var(--primary);font-family:var(--mono)">${minV.toFixed(3)} <span style="font-size:14px">V</span></div>
+            ${ba.min_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.min_cell_id + '</div>' : ''}
+          </div>
+          <div style="background:var(--surface);border:2px solid var(--success);border-radius:10px;padding:14px;text-align:center;">
+            <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MAX NAPĚTÍ</div>
+            <div style="font-size:22px;font-weight:700;color:var(--success);font-family:var(--mono)">${maxV.toFixed(3)} <span style="font-size:14px">V</span></div>
+            ${ba.max_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.max_cell_id + '</div>' : ''}
+          </div>
+        </div>
+        <div style="text-align:center;margin-bottom:12px;font-size:13px;">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></div>
+        <div style="padding:10px 12px;background:var(--surface);border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.6;">
+          Cerbo GX (CAN bus) posílá pouze min/max. Pro napětí všech článků zapoj USB-RS485 do RPi a nastav <code>seplos.enabled: true</code>.
+        </div>`;
     }
   }
 }

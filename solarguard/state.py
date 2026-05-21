@@ -308,6 +308,46 @@ class SpotPriceData:
         ]
 
 
+@dataclass
+class SeplosData:
+    """v4.3.2 NEW: Seplos BMS V3.0 - data z RS485 Modbus RTU.
+
+    Obsahuje napeti vsech clanku ze vsech pack - neco co Cerbo GX pres CAN neposila.
+    pack_cell_voltages[pack_idx][cell_idx] = napeti v V.
+    """
+    online: bool = False
+    last_update: float = 0.0
+
+    pack_cell_voltages: list = field(default_factory=list)   # [[3.322, ...], [...]]
+    pack_temperatures: list = field(default_factory=list)    # [[25.1, 26.2, ...], ...]
+    pack_voltages: list = field(default_factory=list)        # [53.70, 53.71]
+    pack_currents: list = field(default_factory=list)        # [-16.5, -16.5]
+    pack_soc: list = field(default_factory=list)             # [98.0, 98.0]
+    pack_soh: list = field(default_factory=list)             # [100.0, 100.0]
+
+    min_cell_voltage: Optional[float] = None
+    max_cell_voltage: Optional[float] = None
+    min_cell_pack:    Optional[int]   = None   # 1-based
+    min_cell_index:   Optional[int]   = None   # 1-based
+    max_cell_pack:    Optional[int]   = None
+    max_cell_index:   Optional[int]   = None
+
+    @property
+    def is_stale(self) -> bool:
+        if self.last_update == 0: return True
+        return (time.time() - self.last_update) > 120
+
+    @property
+    def all_cells_flat(self) -> list:
+        """[{pack, cell, v}, ...] serazeno pack->cell, filtruje nulova napeti."""
+        result = []
+        for pi, cells in enumerate(self.pack_cell_voltages):
+            for ci, v in enumerate(cells):
+                if v and v > 0:
+                    result.append({'pack': pi + 1, 'cell': ci + 1, 'v': round(v, 4)})
+        return result
+
+
 def _make_preshower():
     """Lazy import aby nedoslo k cyklickemu importu (preshower.py importuje state)."""
     from .engine.preshower import PreShowerProgram
@@ -385,6 +425,7 @@ class SystemContext:
     spot: SpotPriceData = field(default_factory=SpotPriceData)           # v3.6 NEW
     preshower: object = field(default_factory=_make_preshower)           # v3.7 NEW
     heatpump: HeatPumpData = field(default_factory=HeatPumpData)          # v4.2.0 NEW
+    seplos: SeplosData = field(default_factory=SeplosData)                # v4.3.2 NEW
 
     current_state: SystemState = SystemState.IDLE
     state_entered_at: float = field(default_factory=time.time)

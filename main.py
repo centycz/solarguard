@@ -322,6 +322,23 @@ class SolarGuard:
                 min_room_target_c=hp_cfg.get("min_room_c", 18),
             ))
 
+        # v4.3.2 NEW: Seplos BMS V3.0 RS485 Modbus RTU driver
+        self.seplos = None
+        sep_cfg = cfg.get("seplos", {})
+        if sep_cfg.get("enabled", False):
+            from solarguard.sources.seplos import SeplosRS485
+            self.seplos = SeplosRS485(
+                port=sep_cfg["port"],
+                pack_count=sep_cfg.get("pack_count", 2),
+                cells_per_pack=sep_cfg.get("cells_per_pack", 16),
+                context=self.ctx,
+                baudrate=sep_cfg.get("baudrate", 9600),
+                poll_interval_sec=sep_cfg.get("poll_interval_sec", 30),
+                reg_cell_start=int(sep_cfg.get("reg_cell_start", "0x1100"), 16)
+                    if isinstance(sep_cfg.get("reg_cell_start", 0x1100), str)
+                    else sep_cfg.get("reg_cell_start", 0x1100),
+            )
+
         self.app = create_app(self.ctx, cfg)
         set_spa_controller(self.spa)
         set_cleaning_manager(self.cleaning)
@@ -661,6 +678,8 @@ class SolarGuard:
         if self.influx: await self.influx.start()
         # v4.3.0 NEW
         if self.h66: await self.h66.start()
+        # v4.3.2 NEW: Seplos BMS RS485
+        if self.seplos: await self.seplos.start()
         # v4.3.0 NEW: Appliance learning - sample loop
         await self.learning.start()
 

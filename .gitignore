@@ -10,6 +10,9 @@ __pycache__/
 venv/
 env/
 
+# Konfigurace s hesly a IP adresami — NIKDY na verejny repo
+config.yaml
+
 # Runtime data (generováno za běhu)
 learned_profiles.json
 digest_history.jsonl

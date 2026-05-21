@@ -92,29 +92,32 @@ def set_learning_manager(lm):
     global _learning_manager; _learning_manager = lm
 
 
+# v4.3.2 NEW: Seplos BMS data serializace pro JSON API (nikdy nehazi vyjimku)
 def _seplos_json(s) -> dict:
-    """Serializuje SeplosData pro JSON API."""
-    if s is None:
-        return {"enabled": False}
-    flat = s.all_cells_flat if hasattr(s, 'all_cells_flat') else []
-    return {
-        "enabled": True,
-        "online": s.online,
-        "stale": s.is_stale if hasattr(s, 'is_stale') else True,
-        "pack_count": len(s.pack_cell_voltages),
-        "cells_per_pack": len(s.pack_cell_voltages[0]) if s.pack_cell_voltages else 0,
-        "all_cells": flat,
-        "pack_voltages": s.pack_voltages,
-        "pack_currents": s.pack_currents,
-        "pack_soc": s.pack_soc,
-        "pack_temperatures": s.pack_temperatures,
-        "min_cell_voltage": s.min_cell_voltage,
-        "max_cell_voltage": s.max_cell_voltage,
-        "min_cell_pack": s.min_cell_pack,
-        "min_cell_index": s.min_cell_index,
-        "max_cell_pack": s.max_cell_pack,
-        "max_cell_index": s.max_cell_index,
-    }
+    try:
+        if s is None:
+            return {"enabled": False}
+        flat = s.all_cells_flat if hasattr(s, 'all_cells_flat') else []
+        return {
+            "enabled": True,
+            "online": bool(getattr(s, 'online', False)),
+            "pack_count": len(s.pack_cell_voltages) if s.pack_cell_voltages else 0,
+            "cells_per_pack": len(s.pack_cell_voltages[0]) if s.pack_cell_voltages else 0,
+            "all_cells": flat,
+            "pack_voltages": list(s.pack_voltages) if s.pack_voltages else [],
+            "pack_currents": list(s.pack_currents) if s.pack_currents else [],
+            "pack_soc": list(s.pack_soc) if s.pack_soc else [],
+            "pack_temperatures": list(s.pack_temperatures) if s.pack_temperatures else [],
+            "min_cell_voltage": s.min_cell_voltage,
+            "max_cell_voltage": s.max_cell_voltage,
+            "min_cell_pack": s.min_cell_pack,
+            "min_cell_index": s.min_cell_index,
+            "max_cell_pack": s.max_cell_pack,
+            "max_cell_index": s.max_cell_index,
+        }
+    except Exception as e:
+        log.warning(f"_seplos_json error: {e}")
+        return {"enabled": False, "error": str(e)}
 
 
 def record_tick(ctx: SystemContext, decision_reason: str = "") -> None:
@@ -230,13 +233,8 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
                 "battery_in_today_kwh": v.battery_in_today_kwh,
                 "pv_yield_yesterday_kwh": v.pv_yield_yesterday_kwh,
                 "consumption_yesterday_kwh": v.consumption_yesterday_kwh,
-                # v4.3.1: min/max z MQTT (Cerbo GX CAN agregat)
-                "cell_voltages": [{"num": n, "v": round(volt, 4)} for n, volt in sorted(v.cell_voltages.items())],
-                "min_cell_voltage_v": v.min_cell_voltage_v,
-                "max_cell_voltage_v": v.max_cell_voltage_v,
-                "min_cell_id": v.min_cell_id,
-                "max_cell_id": v.max_cell_id,
             },
+            # v4.3.2 NEW: Seplos BMS RS485 - napeti vsech clanku
             "seplos": _seplos_json(ctx.seplos),
             "spa": {
                 "current_temp": s.current_temp_c, "target_temp": s.target_temp_c,
@@ -464,14 +462,7 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
                 "battery_full_pct": battery_full_pct,
                 "is_battery_full": battery_full,
                 "is_under_min": v.soc_pct is not None and v.soc_pct < cfg.get("min_soc_pct", 20),
-                # v4.3.1: min/max z MQTT (Cerbo GX)
-                "cell_voltages": [{"num": n, "v": round(volt, 4)} for n, volt in sorted(v.cell_voltages.items())],
-                "min_cell_voltage_v": v.min_cell_voltage_v,
-                "max_cell_voltage_v": v.max_cell_voltage_v,
-                "min_cell_id": v.min_cell_id,
-                "max_cell_id": v.max_cell_id,
             },
-            "seplos": _seplos_json(ctx.seplos),
             "spa": {
                 "online": s.online,
                 "current_temp_c": s.current_temp_c,
@@ -494,6 +485,8 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
                 "stale": v.is_stale,
                 "last_update_age_sec": int(now - v.last_update) if v.last_update else None,
             },
+            # v4.3.2 NEW: Seplos BMS pro panel napeti clanku v Rozhodnuti tabu
+            "seplos": _seplos_json(ctx.seplos),
             "last_decision": {
                 "reason": last_reason,
                 "ts": last_tick.get("ts") if last_tick else None,
@@ -3021,11 +3014,11 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
     </div>
   </div>
 
-  <!-- v4.3.1 NEW: Cell voltage panel -->
+  <!-- v4.3.2 NEW: Napeti clanku z Seplos BMS RS485 -->
   <div class="section">
-    <div class="section-title"><h2>Napětí článků baterie (BMS)</h2></div>
+    <div class="section-title"><h2>Napětí článků baterie (Seplos BMS)</h2></div>
     <div id="cellsPanel" class="info-card" style="padding: 16px;">
-      <!-- vyplni JS -->
+      <div style="color:var(--text-muted);text-align:center;">načítám…</div>
     </div>
   </div>
 
@@ -3840,30 +3833,24 @@ async function startCleaning(hours) {
   await apiPost('/api/spa/cleaning/start', {hours: hours});
 }
 
-function _showErr(msg) {
-  let eb = document.getElementById('_jsErr');
-  if (!eb) { eb = document.createElement('div'); eb.id='_jsErr'; eb.style.cssText='position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:12px;z-index:9999;font:12px monospace;white-space:pre-wrap;cursor:pointer'; eb.onclick=()=>eb.remove(); document.body.prepend(eb); }
-  eb.textContent = 'CHYBA: ' + msg;
-}
-
 async function refresh() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
     lastState = s;
+    // NEW v3.3: pokud SW vratil stale data, ukaz banner
     if (s._stale) {
       updateOfflineBanner(true, false, s._stale_age_sec);
     } else {
       updateOfflineBanner(false, false);
     }
-    try { renderHeader(s); } catch(e) { _showErr('renderHeader: '+e.message); return; }
-    try { renderControl(s); } catch(e) { _showErr('renderControl: '+e.message); return; }
+    renderHeader(s);
+    renderControl(s);
     // v3.7: heating prediction (jen na control tabu)
     if (activeTab === 'control') {
       updateHeatingPrediction();
     }
     if (activeTab === 'overview') {
-      try { renderPlan(s); } catch(e) { _showErr('renderPlan: '+e.message); return; }
-      try { renderOverview(s); } catch(e) { _showErr('renderOverview: '+e.message); return; }
+      renderPlan(s); renderOverview(s);
       const h = await fetch('/api/history').then(r => r.json());
       renderChart(h.ticks);
       // v4.0 NEW: insights
@@ -3915,17 +3902,8 @@ async function refresh() {
       renderOverview(s);
     }
   } catch (e) {
-    console.error('refresh() error:', e);
-    // Zobraz chybu viditelne na strance (docasne pro debug)
-    let eb = document.getElementById('_jsErr');
-    if (!eb) {
-      eb = document.createElement('div');
-      eb.id = '_jsErr';
-      eb.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:10px 14px;z-index:9999;font-family:monospace;font-size:12px;white-space:pre-wrap;cursor:pointer';
-      eb.onclick = () => eb.remove();
-      document.body.prepend(eb);
-    }
-    eb.textContent = 'JS chyba: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0,3).join('\n');
+    console.error(e);
+    // NEW v3.3: hard offline (nic v cache) -> show banner
     updateOfflineBanner(true, false, null);
   }
 }
@@ -5158,109 +5136,77 @@ function renderEngineStatus(es) {
     ph.innerHTML = phasesHtml;
   }
 
-  // v4.3.2: cell voltage panel - Seplos RS485 (bezpecne wrap, aby pripadna chyba nezablokovala zbytek)
+  // v4.3.2 NEW: Seplos BMS - napeti vsech clanku z RS485
+  // Vse v try/catch aby pripadna chyba nikdy nezablokovala zbytek dashboardu.
   try {
-  const cellsDiv = document.getElementById('cellsPanel');
-  if (!cellsDiv) throw new Error('no cellsPanel');
+    var cellsDiv = document.getElementById('cellsPanel');
+    if (cellsDiv && es.seplos) {
+      var sep = es.seplos;
+      if (!sep.enabled) {
+        cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:14px;font-size:12px;">Seplos RS485 není zapnut v config.yaml (sekce <code>seplos:</code>).</div>';
+      } else if (!sep.online || !sep.all_cells || sep.all_cells.length === 0) {
+        cellsDiv.innerHTML = '<div style="color:var(--warning);text-align:center;padding:14px;font-size:12px;">⏳ Čekám na data ze Seplos BMS… (port /dev/ttyUSB0, 19200 baud)</div>';
+      } else {
+        var cells = sep.all_cells;
+        var minV = sep.min_cell_voltage || 0;
+        var maxV = sep.max_cell_voltage || 0;
+        var spreadMv = Math.round((maxV - minV) * 1000);
+        var spreadColor = spreadMv > 100 ? 'var(--danger)' : (spreadMv > 50 ? 'var(--warning)' : 'var(--success)');
 
-  const sep = es.seplos;
-  const ba  = es.battery || {};
+        var html = '<div style="margin-bottom:12px;font-size:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;">'
+          + '<span style="font-size:10px;background:rgba(34,197,94,.15);color:var(--success);padding:2px 8px;border-radius:20px;font-weight:700;letter-spacing:1px;">RS485 LIVE</span>'
+          + '<span>' + sep.pack_count + ' pack × ' + sep.cells_per_pack + 'S = ' + cells.length + ' článků</span>'
+          + '<span>min: <strong style="color:var(--primary);font-family:var(--mono)">' + minV.toFixed(3) + ' V</strong></span>'
+          + '<span>max: <strong style="color:var(--success);font-family:var(--mono)">' + maxV.toFixed(3) + ' V</strong></span>'
+          + '<span>spread: <strong style="color:' + spreadColor + ';font-family:var(--mono)">' + spreadMv + ' mV</strong></span>'
+          + '</div>';
 
-  // ── Seplos RS485 data k dispozici? ──────────────────────────────────────
-  if (sep && sep.enabled && sep.online && sep.all_cells && sep.all_cells.length > 0) {
-    const cells = sep.all_cells;
-    const minV  = sep.min_cell_voltage;
-    const maxV  = sep.max_cell_voltage;
-    const spread = maxV - minV;
-    const spreadMs = Math.round(spread * 1000);
-    const spreadColor = spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)');
-    const spreadNote  = spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK');
-    const cellColor = v => v < 3.0 ? 'var(--danger)' : (v > 3.55 ? 'var(--warning)' : 'var(--success)');
+        // Seskup po packach
+        var packNums = [];
+        for (var i = 0; i < cells.length; i++) {
+          if (packNums.indexOf(cells[i].pack) < 0) packNums.push(cells[i].pack);
+        }
+        packNums.sort(function(a, b) { return a - b; });
 
-    // Souhrnny radek
-    let html = `<div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
-      <span style="font-size:11px;background:rgba(34,197,94,.15);color:var(--success);padding:2px 8px;border-radius:20px;font-weight:600;">RS485 live</span>
-      <span style="font-size:12px;color:var(--text-muted)">${sep.pack_count} × ${sep.cells_per_pack}S = ${cells.length} článků</span>
-      <span style="font-size:12px">min: <strong style="color:var(--primary);font-family:var(--mono)">${minV.toFixed(3)} V</strong> <span style="font-size:10px;color:var(--text-muted)">(P${sep.min_cell_pack}C${sep.min_cell_index})</span></span>
-      <span style="font-size:12px">max: <strong style="color:var(--success);font-family:var(--mono)">${maxV.toFixed(3)} V</strong> <span style="font-size:10px;color:var(--text-muted)">(P${sep.max_cell_pack}C${sep.max_cell_index})</span></span>
-      <span style="font-size:12px">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></span>
-    </div>`;
+        for (var pi = 0; pi < packNums.length; pi++) {
+          var pn = packNums[pi];
+          var idx = pn - 1;
+          var packV = (sep.pack_voltages && sep.pack_voltages[idx] != null) ? sep.pack_voltages[idx].toFixed(2) + ' V' : '—';
+          var packA = (sep.pack_currents && sep.pack_currents[idx] != null) ? sep.pack_currents[idx].toFixed(1) + ' A' : '—';
+          var packSoc = (sep.pack_soc && sep.pack_soc[idx] != null) ? sep.pack_soc[idx].toFixed(0) + ' %' : '—';
+          var packTemps = (sep.pack_temperatures && sep.pack_temperatures[idx]) || [];
+          var tempStr = packTemps.length ? packTemps.map(function(t) { return t.toFixed(1) + '°'; }).join(' / ') : '—';
 
-    // Grid clanku - seskupene po packach
-    const packCount = sep.pack_count;
-    for (let pi = 0; pi < packCount; pi++) {
-      const packCells = cells.filter(c => c.pack === pi + 1);
-      if (!packCells.length) continue;
+          html += '<div style="margin-bottom:14px;">'
+            + '<div style="font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:1.5px;margin-bottom:6px;">'
+            + 'PACK ' + pn + ' &nbsp; <span style="font-weight:400;font-family:var(--mono)">' + packV + ' · ' + packA + ' · SOC ' + packSoc + ' · 🌡 ' + tempStr + '</span>'
+            + '</div>'
+            + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:5px;">';
 
-      // Info o packu: napeti, proud, SOC
-      const pv  = sep.pack_voltages  && sep.pack_voltages[pi]  != null ? sep.pack_voltages[pi].toFixed(2)  + ' V'  : '—';
-      const pc  = sep.pack_currents  && sep.pack_currents[pi]  != null ? sep.pack_currents[pi].toFixed(1)  + ' A'  : '—';
-      const ps  = sep.pack_soc       && sep.pack_soc[pi]       != null ? sep.pack_soc[pi].toFixed(0)       + ' %'  : '—';
-      const temps = sep.pack_temperatures && sep.pack_temperatures[pi] || [];
-      const tempStr = temps.length ? temps.map(t => t.toFixed(1) + '°').join(' / ') : '—';
-
-      html += `<div style="margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
-          <span style="font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:1.5px;">PACK ${pi+1}</span>
-          <span style="font-size:11px;font-family:var(--mono);color:var(--text-muted)">${pv} · ${pc} · SOC ${ps} · 🌡 ${tempStr}</span>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(68px,1fr));gap:6px;">`;
-
-      packCells.forEach(c => {
-        const isMin = c.pack === sep.min_cell_pack && c.cell === sep.min_cell_index;
-        const isMax = c.pack === sep.max_cell_pack && c.cell === sep.max_cell_index;
-        const border = isMin ? '2px solid var(--primary)' : (isMax ? '2px solid var(--success)' : '1px solid var(--border)');
-        const badge  = isMin
-          ? '<div style="font-size:9px;color:var(--primary);font-weight:700;letter-spacing:.5px;margin-top:1px">MIN</div>'
-          : (isMax
-            ? '<div style="font-size:9px;color:var(--success);font-weight:700;letter-spacing:.5px;margin-top:1px">MAX</div>'
-            : '<div style="font-size:9px;opacity:0">·</div>');
-        html += `<div style="background:var(--surface);border:${border};border-radius:7px;padding:6px 3px;text-align:center;">
-          <div style="font-size:9px;color:var(--text-muted);letter-spacing:.8px;margin-bottom:2px">C${c.cell}</div>
-          <div style="font-size:12px;font-weight:700;color:${cellColor(c.v)};font-family:var(--mono)">${c.v.toFixed(3)}</div>
-          ${badge}
-        </div>`;
-      });
-
-      html += '</div></div>';
+          for (var ci = 0; ci < cells.length; ci++) {
+            var c = cells[ci];
+            if (c.pack !== pn) continue;
+            var isMin = (c.pack === sep.min_cell_pack && c.cell === sep.min_cell_index);
+            var isMax = (c.pack === sep.max_cell_pack && c.cell === sep.max_cell_index);
+            var border = isMin ? '2px solid var(--primary)' : (isMax ? '2px solid var(--success)' : '1px solid var(--border)');
+            var color = c.v < 3.0 ? 'var(--danger)' : (c.v > 3.55 ? 'var(--warning)' : 'var(--text)');
+            var badge = isMin ? '<div style="font-size:9px;color:var(--primary);font-weight:700;">MIN</div>'
+                       : (isMax ? '<div style="font-size:9px;color:var(--success);font-weight:700;">MAX</div>'
+                       : '<div style="font-size:9px;opacity:0">·</div>');
+            html += '<div style="background:var(--surface);border:' + border + ';border-radius:6px;padding:6px 3px;text-align:center;">'
+              + '<div style="font-size:9px;color:var(--text-muted);margin-bottom:2px;">C' + c.cell + '</div>'
+              + '<div style="font-size:12px;font-weight:700;color:' + color + ';font-family:var(--mono);">' + c.v.toFixed(3) + '</div>'
+              + badge
+              + '</div>';
+          }
+          html += '</div></div>';
+        }
+        cellsDiv.innerHTML = html;
+      }
     }
-
-    cellsDiv.innerHTML = html;
-
-  // ── Fallback: pouze MQTT min/max z Cerbo GX ─────────────────────────────
-  } else {
-    const minV = ba && ba.min_cell_voltage_v;
-    const maxV = ba && ba.max_cell_voltage_v;
-
-    if (sep && sep.enabled && !sep.online) {
-      cellsDiv.innerHTML = '<div style="color:var(--warning);text-align:center;padding:20px;">⚠ Seplos RS485 nakonfigurován, ale neodpovídá. Zkontroluj port a zapojení.</div>';
-    } else if (minV == null) {
-      cellsDiv.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:20px;">Čekám na data z BMS…<br><span style="font-size:11px;margin-top:6px;display:block;">Pro napětí všech článků zapoj USB-RS485 do RPi a nastav <code>seplos.enabled: true</code> v config.yaml</span></div>';
-    } else {
-      const spread = maxV - minV;
-      const spreadMs = Math.round(spread * 1000);
-      const spreadColor = spread > 0.100 ? 'var(--danger)' : (spread > 0.050 ? 'var(--warning)' : 'var(--success)');
-      const spreadNote  = spread > 0.100 ? ' ⚠ nerovnováha!' : (spread > 0.050 ? ' pozor' : ' ✓ OK');
-      cellsDiv.innerHTML = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
-          <div style="background:var(--surface);border:2px solid var(--primary);border-radius:10px;padding:14px;text-align:center;">
-            <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MIN NAPĚTÍ</div>
-            <div style="font-size:22px;font-weight:700;color:var(--primary);font-family:var(--mono)">${minV.toFixed(3)} <span style="font-size:14px">V</span></div>
-            ${ba.min_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.min_cell_id + '</div>' : ''}
-          </div>
-          <div style="background:var(--surface);border:2px solid var(--success);border-radius:10px;padding:14px;text-align:center;">
-            <div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px;">MAX NAPĚTÍ</div>
-            <div style="font-size:22px;font-weight:700;color:var(--success);font-family:var(--mono)">${maxV.toFixed(3)} <span style="font-size:14px">V</span></div>
-            ${ba.max_cell_id ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + ba.max_cell_id + '</div>' : ''}
-          </div>
-        </div>
-        <div style="text-align:center;margin-bottom:12px;font-size:13px;">spread: <strong style="color:${spreadColor};font-family:var(--mono)">${spreadMs} mV${spreadNote}</strong></div>
-        <div style="padding:10px 12px;background:var(--surface);border-radius:8px;font-size:11px;color:var(--text-muted);line-height:1.6;">
-          Cerbo GX (CAN bus) posílá pouze min/max. Pro napětí všech článků zapoj USB-RS485 do RPi a nastav <code>seplos.enabled: true</code>.
-        </div>`;
-    }
+  } catch (e) {
+    console.warn('cellsPanel render error:', e);
   }
-  } catch(e) { console.warn('cellsPanel render error:', e); }
 }
 
 // v4.3.0 NEW: filter chips state

@@ -3909,8 +3909,17 @@ async function refresh() {
       renderOverview(s);
     }
   } catch (e) {
-    console.error(e);
-    // NEW v3.3: hard offline (nic v cache) -> show banner
+    console.error('refresh() error:', e);
+    // Zobraz chybu viditelne na strance (docasne pro debug)
+    let eb = document.getElementById('_jsErr');
+    if (!eb) {
+      eb = document.createElement('div');
+      eb.id = '_jsErr';
+      eb.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:10px 14px;z-index:9999;font-family:monospace;font-size:12px;white-space:pre-wrap;cursor:pointer';
+      eb.onclick = () => eb.remove();
+      document.body.prepend(eb);
+    }
+    eb.textContent = 'JS chyba: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0,3).join('\n');
     updateOfflineBanner(true, false, null);
   }
 }

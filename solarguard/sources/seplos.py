@@ -169,13 +169,18 @@ class SeplosRS485:
         soh = None
         summary_bytes = data[temp_end_off:]
 
-        # DEBUG: kazdy 60. ramec dump zbyvajicich bytu pro budouci analyzu
+        # DEBUG: kazdy 5. ramec dump zbyvajicich bytu pro analyzu protokolu
+        # (po vyladeni offsetu lze snizit na 60+)
         if not hasattr(self, '_dbg_counter'):
             self._dbg_counter = 0
         self._dbg_counter += 1
-        if self._dbg_counter % 60 == 0 and summary_bytes:
-            hex_dump = ' '.join(f'{b:02x}' for b in summary_bytes[:24])
-            log.info(f"Seplos summary raw (after {len(temperatures)} temps, {len(summary_bytes)}B): {hex_dump}")
+        if self._dbg_counter % 5 == 0 and summary_bytes:
+            full_hex = ' '.join(f'{b:02x}' for b in summary_bytes)
+            log.info(f"Seplos {len(temperatures)}temps end_off={temp_end_off} sumBytes({len(summary_bytes)}): {full_hex}")
+            # Vystaveni do attributu - muze cist API endpoint
+            self._last_summary_hex = full_hex
+            self._last_summary_bytes = bytes(summary_bytes)
+            self._last_temp_count = len(temperatures)
 
         # Hledame validni pack voltage (40-60V pro 16S LiFePO4) v summary
         for off in range(0, min(len(summary_bytes), 10), 2):

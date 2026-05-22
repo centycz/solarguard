@@ -143,11 +143,14 @@ class SeplosRS485:
             for i in range(self.cells_per_pack)
         ]
 
-        # Teploty: scanujeme od konce cell napeti, hledame raw 2700-3500
+        # Teploty: scanujeme od konce cell napeti, hledame raw 2700-3500.
+        # Cap = 6 (typicky Seplos V3 16S = 4 cell + ambient + MOSFET).
+        # Hodnoty za 6. NTC mohou byt jine summary fields i kdyz nahodne padnou
+        # do teplotniho rozsahu - radeji je nepocitame jako teploty.
         t_off = self.cells_per_pack * 2
         temperatures = []
         temp_end_off = t_off
-        max_temp_sensors = 8
+        max_temp_sensors = 6
         for i in range(max_temp_sensors):
             pos = t_off + i * 2
             if pos + 2 > len(data):
@@ -169,18 +172,13 @@ class SeplosRS485:
         soh = None
         summary_bytes = data[temp_end_off:]
 
-        # DEBUG: kazdy 5. ramec dump zbyvajicich bytu pro analyzu protokolu
-        # (po vyladeni offsetu lze snizit na 60+)
+        # DEBUG: kazdy 60. ramec (= ~30 min pri 2 packech) dump pro analyzu
         if not hasattr(self, '_dbg_counter'):
             self._dbg_counter = 0
         self._dbg_counter += 1
-        if self._dbg_counter % 5 == 0 and summary_bytes:
+        if self._dbg_counter % 60 == 0 and summary_bytes:
             full_hex = ' '.join(f'{b:02x}' for b in summary_bytes)
-            log.info(f"Seplos {len(temperatures)}temps end_off={temp_end_off} sumBytes({len(summary_bytes)}): {full_hex}")
-            # Vystaveni do attributu - muze cist API endpoint
-            self._last_summary_hex = full_hex
-            self._last_summary_bytes = bytes(summary_bytes)
-            self._last_temp_count = len(temperatures)
+            log.info(f"Seplos {len(temperatures)}temps sumBytes({len(summary_bytes)}): {full_hex}")
 
         # Hledame validni pack voltage (40-60V pro 16S LiFePO4) v summary
         for off in range(0, min(len(summary_bytes), 10), 2):

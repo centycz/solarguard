@@ -122,36 +122,93 @@ class SeplosRS485:
         return None
 
     def _parse_frame_data(self, data: bytes) -> dict:
-        """Parsuje 52 bytů dat z Modbus rámce."""
-        # Napětí článků: prvních cells_per_pack × 2 bytů, jednotka mV
+        """Parsuje data za hlavickou Modbus ramce.
+
+        Struktura ramce neni dokumentovana stejne pro vsechny verze Seplos V3.
+        Puvodni parser s fixnim offsetem cetl teplotni offset misto pack_voltage
+        (vystup: pack 27.31V misto skutecnych 55V, SOC 273% misto realnyh procent).
+
+        Tato verze:
+        - cell_voltages: prvnich cells_per_pack * 2B (overeno - vzdy spravne)
+        - temperatures: scanujeme dokud nenarazime na hodnotu mimo rozsah
+          2700-3500 (=  -3 az +77 C). Bezne 4 nebo 6 NTC.
+        - pack_voltage: SUMA clanku (vzdy spravne pro seriove zapojeni);
+          alternativne validni raw v rozsahu 40-60V
+        - current/SOC/SOH: validace proti rozumnym rozsahum, jinak None
+        - DEBUG: kazdy 60. ramec hex dump zbylych bytu pro analyzu protokolu
+        """
+        # Napětí článků (overeno spravne)
         cell_voltages = [
             struct.unpack_from('>H', data, i * 2)[0] / 1000.0
             for i in range(self.cells_per_pack)
         ]
 
-        # Teploty: 4 senzory, 0.1K (offset 2731 = 273.1K = 0°C)
+        # Teploty: scanujeme od konce cell napeti, hledame raw 2700-3500
         t_off = self.cells_per_pack * 2
         temperatures = []
-        for i in range(4):
-            raw = struct.unpack_from('>H', data, t_off + i * 2)[0]
-            if raw > 2731:
+        temp_end_off = t_off
+        max_temp_sensors = 8
+        for i in range(max_temp_sensors):
+            pos = t_off + i * 2
+            if pos + 2 > len(data):
+                break
+            raw = struct.unpack_from('>H', data, pos)[0]
+            if 2700 <= raw <= 3500:  # validni teplota v 0.1K (= -3 az 77 C)
                 temperatures.append(round((raw - 2731) / 10.0, 1))
+                temp_end_off = pos + 2
+            else:
+                break
 
-        # Souhrn packu
-        s_off = t_off + 4 * 2
-        pack_voltage = None
+        # Pack voltage = SUMA clanku (vzdy spravne pri serioveho zapojeni)
+        computed_pack_voltage = round(sum(cell_voltages), 3)
+        pack_voltage = computed_pack_voltage  # default = computed
+
+        # Zkusime najit summary fields v bytech za teplotami
         current = None
         soc = None
         soh = None
+        summary_bytes = data[temp_end_off:]
 
-        if len(data) >= s_off + 8:
-            pack_voltage = struct.unpack_from('>H', data, s_off)[0] / 100.0
-            cur_raw = struct.unpack_from('>H', data, s_off + 2)[0]
-            if cur_raw > 32767:
-                cur_raw -= 65536
-            current = cur_raw / 100.0
-            soc = struct.unpack_from('>H', data, s_off + 4)[0] / 10.0
-            soh = struct.unpack_from('>H', data, s_off + 6)[0] / 10.0
+        # DEBUG: kazdy 60. ramec dump zbyvajicich bytu pro budouci analyzu
+        if not hasattr(self, '_dbg_counter'):
+            self._dbg_counter = 0
+        self._dbg_counter += 1
+        if self._dbg_counter % 60 == 0 and summary_bytes:
+            hex_dump = ' '.join(f'{b:02x}' for b in summary_bytes[:24])
+            log.info(f"Seplos summary raw (after {len(temperatures)} temps, {len(summary_bytes)}B): {hex_dump}")
+
+        # Hledame validni pack voltage (40-60V pro 16S LiFePO4) v summary
+        for off in range(0, min(len(summary_bytes), 10), 2):
+            if off + 2 > len(summary_bytes):
+                break
+            raw_v = struct.unpack_from('>H', summary_bytes, off)[0]
+            v_test = raw_v / 100.0
+            if 40.0 <= v_test <= 60.0:
+                # Validni - prepiseme computed pack_voltage z BMS hodnoty
+                # (kontrola jestli neni vetsi nez 5% odchylka od soucty clanku)
+                if abs(v_test - computed_pack_voltage) <= computed_pack_voltage * 0.05:
+                    pack_voltage = v_test
+                # Hned za pack_voltage byva current (signed 16b, /100)
+                if off + 4 <= len(summary_bytes):
+                    cur_raw = struct.unpack_from('>H', summary_bytes, off + 2)[0]
+                    if cur_raw > 32767:
+                        cur_raw -= 65536
+                    cur_test = cur_raw / 100.0
+                    if -300.0 <= cur_test <= 300.0:
+                        current = cur_test
+                # SOC za current (0-100%, zkusime /10 i /100)
+                if off + 6 <= len(summary_bytes):
+                    soc_raw = struct.unpack_from('>H', summary_bytes, off + 4)[0]
+                    if 0 <= soc_raw <= 1000:    # /10
+                        soc = soc_raw / 10.0
+                    elif 0 <= soc_raw <= 10000:  # /100
+                        soc = soc_raw / 100.0
+                # SOH za SOC
+                if off + 8 <= len(summary_bytes):
+                    soh_raw = struct.unpack_from('>H', summary_bytes, off + 6)[0]
+                    if 0 <= soh_raw <= 1100:
+                        soh = soh_raw / 10.0
+                break
 
         return {
             'cell_voltages': cell_voltages,

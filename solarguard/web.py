@@ -30,10 +30,18 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # v4.3.2 NEW: cesta pro snapshoty napeti clanku pri SOC 99% a 20% (persistence pres restarty)
 SNAPSHOT_PATH = Path("data") / "cell_snapshots.jsonl"
-SNAPSHOT_FULL_THRESHOLD = 99.0   # SOC% - kdyz vystoupa nad, ulozi snapshot "FULL"
-SNAPSHOT_LOW_THRESHOLD  = 20.0   # SOC% - kdyz klesne pod, ulozi snapshot "LOW"
-SNAPSHOT_HYSTERESIS     = 5.0    # vrat SOC zpet pres tuto hranici neez znova logovat
-SNAPSHOT_MAX_RECORDS    = 100    # in-memory deque cap; soubor neorezavame
+# Primary trigger - SOC z Cerbo GX (Victron MQTT)
+SNAPSHOT_FULL_SOC = 99.0   # SOC% - kdyz vystoupa nad, ulozi snapshot "FULL"
+SNAPSHOT_LOW_SOC  = 20.0   # SOC% - kdyz klesne pod, ulozi snapshot "LOW"
+SNAPSHOT_SOC_HYST = 5.0    # vrat SOC zpet pres tuto hranici nez znova logovat
+# Backup trigger - LiFePO4 cell voltage knee. Cerbo GX byva zaseknute na 98%
+# (chybi sync-to-full kalibrace) - tak SOC trigger se nemusi nikdy spustit.
+# Proto sledujeme i napeti clanku: pri 3.45+V je LiFePO4 prakticky full,
+# pri 3.10-V je prakticky empty.
+SNAPSHOT_FULL_CELL_V = 3.45    # max_cell_voltage >= -> ulozit FULL snapshot
+SNAPSHOT_LOW_CELL_V  = 3.10    # min_cell_voltage <= -> ulozit LOW snapshot
+SNAPSHOT_CELL_HYST   = 0.05    # 50 mV hystereze
+SNAPSHOT_MAX_RECORDS = 100     # in-memory deque cap; soubor neorezavame
 
 tick_history: Deque[Dict[str, Any]] = deque(maxlen=3000)
 event_history: Deque[Dict[str, Any]] = deque(maxlen=500)
@@ -84,32 +92,56 @@ def _write_snapshot(snapshot: dict) -> None:
 
 
 def _check_snapshot(ctx) -> None:
-    """Detekuje prechody SOC pres FULL/LOW hranice a ulozi snapshot napeti vsech clanku.
+    """Detekuje pripady kdy je baterie plne nabita / vybita a ulozi snapshot
+    napeti vsech clanku.
 
-    FULL snapshot: SOC vystoupa nad SNAPSHOT_FULL_THRESHOLD (99%).
-    LOW snapshot:  SOC klesne pod SNAPSHOT_LOW_THRESHOLD (20%).
-    Hystereze: dalsi snapshot stejneho typu az kdyz se SOC vrati o SNAPSHOT_HYSTERESIS od hranice.
+    Dva nezavisle triggery (staci aby kterykoliv splnil podminku):
+    - SOC trigger: SOC z Cerbo GX prekroci 99% / klesne pod 20%
+    - Cell voltage trigger: max_cell >= 3.45V (LiFePO4 plne nabita) /
+      min_cell <= 3.10V (LiFePO4 prakticky vybita)
+
+    Druhy trigger reaguje na situaci kdy Cerbo GX SOC nikdy nedosahne 99%
+    (chybi sync-to-full kalibrace coulometru) - sledujeme primo napeti clanku
+    ktere je hardware fakt.
+
+    Hystereze: dalsi snapshot stejneho typu az kdyz se hodnota vrati o
+    SNAPSHOT_*_HYST od hranice.
     """
     global _seplos_last_soc, _seplos_full_armed, _seplos_low_armed
     try:
         sep = ctx.seplos
         soc = ctx.victron.soc_pct
-        if soc is None or sep is None or not sep.online or not sep.pack_cell_voltages:
+        if sep is None or not sep.online or not sep.pack_cell_voltages:
+            return
+        if sep.max_cell_voltage is None or sep.min_cell_voltage is None:
             return
 
-        # Hystereze - rearm flagy
-        if soc < SNAPSHOT_FULL_THRESHOLD - SNAPSHOT_HYSTERESIS:
+        max_v = sep.max_cell_voltage
+        min_v = sep.min_cell_voltage
+
+        # Hystereze - rearm flagy. Dva nezavisle indikatory.
+        full_below_hyst = (soc is not None and soc < SNAPSHOT_FULL_SOC - SNAPSHOT_SOC_HYST) \
+                          and (max_v < SNAPSHOT_FULL_CELL_V - SNAPSHOT_CELL_HYST)
+        low_above_hyst  = (soc is not None and soc > SNAPSHOT_LOW_SOC + SNAPSHOT_SOC_HYST) \
+                          and (min_v > SNAPSHOT_LOW_CELL_V + SNAPSHOT_CELL_HYST)
+        if full_below_hyst:
             _seplos_full_armed = True
-        if soc > SNAPSHOT_LOW_THRESHOLD + SNAPSHOT_HYSTERESIS:
+        if low_above_hyst:
             _seplos_low_armed = True
 
-        # Detekce prechodu
+        # Detekce trigger - OR mezi SOC a cell voltage podminkami
+        is_full = (soc is not None and soc >= SNAPSHOT_FULL_SOC) or (max_v >= SNAPSHOT_FULL_CELL_V)
+        is_low  = (soc is not None and soc <= SNAPSHOT_LOW_SOC)  or (min_v <= SNAPSHOT_LOW_CELL_V)
+
         trigger_type = None
-        if soc >= SNAPSHOT_FULL_THRESHOLD and _seplos_full_armed:
+        trigger_reason = None
+        if is_full and _seplos_full_armed:
             trigger_type = "FULL"
+            trigger_reason = f"SOC={soc}% max_cell={max_v:.3f}V"
             _seplos_full_armed = False
-        elif soc <= SNAPSHOT_LOW_THRESHOLD and _seplos_low_armed:
+        elif is_low and _seplos_low_armed:
             trigger_type = "LOW"
+            trigger_reason = f"SOC={soc}% min_cell={min_v:.3f}V"
             _seplos_low_armed = False
 
         _seplos_last_soc = soc
@@ -121,6 +153,7 @@ def _check_snapshot(ctx) -> None:
         snapshot = {
             "ts": time.time(),
             "type": trigger_type,
+            "trigger_reason": trigger_reason,
             "soc": soc,
             "battery_power_w": ctx.victron.battery_power_w,
             "pack_count": len(sep.pack_cell_voltages),
@@ -128,14 +161,13 @@ def _check_snapshot(ctx) -> None:
             "all_cells": flat,
             "pack_voltages": list(sep.pack_voltages) if sep.pack_voltages else [],
             "pack_temperatures": list(sep.pack_temperatures) if sep.pack_temperatures else [],
-            "min_cell_voltage": sep.min_cell_voltage,
-            "max_cell_voltage": sep.max_cell_voltage,
+            "min_cell_voltage": min_v,
+            "max_cell_voltage": max_v,
             "min_cell_pack": sep.min_cell_pack,
             "min_cell_index": sep.min_cell_index,
             "max_cell_pack": sep.max_cell_pack,
             "max_cell_index": sep.max_cell_index,
-            "spread_mv": round((sep.max_cell_voltage - sep.min_cell_voltage) * 1000, 1)
-                if sep.max_cell_voltage and sep.min_cell_voltage else None,
+            "spread_mv": round((max_v - min_v) * 1000, 1),
         }
         _write_snapshot(snapshot)
     except Exception as e:
@@ -663,6 +695,46 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
             "last_full": last_full,
             "last_low": last_low,
         }
+
+    # v4.3.2 NEW: manualni trigger snapshotu - pro testovani UI nebo
+    # zaznam stavu pred udrzbou (uzivatel vidi aktualni stav ulozeny)
+    @app.post("/api/seplos/snapshot/manual", dependencies=[Depends(auth_write)])
+    async def api_seplos_snapshot_manual(request: Request):
+        sep = ctx.seplos
+        if sep is None or not sep.online or not sep.pack_cell_voltages:
+            raise HTTPException(503, "Seplos offline nebo zadne data")
+        if sep.min_cell_voltage is None or sep.max_cell_voltage is None:
+            raise HTTPException(503, "Min/max napeti clanku neni k dispozici")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        snap_type = (body.get("type") if isinstance(body, dict) else None) or "MANUAL"
+        if snap_type not in ("FULL", "LOW", "MANUAL"):
+            snap_type = "MANUAL"
+        flat = sep.all_cells_flat if hasattr(sep, "all_cells_flat") else []
+        snapshot = {
+            "ts": time.time(),
+            "type": snap_type,
+            "trigger_reason": f"manual via API SOC={ctx.victron.soc_pct}% max_cell={sep.max_cell_voltage:.3f}V",
+            "soc": ctx.victron.soc_pct,
+            "battery_power_w": ctx.victron.battery_power_w,
+            "pack_count": len(sep.pack_cell_voltages),
+            "cells_per_pack": len(sep.pack_cell_voltages[0]) if sep.pack_cell_voltages else 0,
+            "all_cells": flat,
+            "pack_voltages": list(sep.pack_voltages) if sep.pack_voltages else [],
+            "pack_temperatures": list(sep.pack_temperatures) if sep.pack_temperatures else [],
+            "min_cell_voltage": sep.min_cell_voltage,
+            "max_cell_voltage": sep.max_cell_voltage,
+            "min_cell_pack": sep.min_cell_pack,
+            "min_cell_index": sep.min_cell_index,
+            "max_cell_pack": sep.max_cell_pack,
+            "max_cell_index": sep.max_cell_index,
+            "spread_mv": round((sep.max_cell_voltage - sep.min_cell_voltage) * 1000, 1),
+        }
+        _write_snapshot(snapshot)
+        record_event("seplos_snapshot_manual", snap_type=snap_type)
+        return {"success": True, "snapshot": snapshot}
 
     @app.get("/api/appliances")
     async def api_appliances():
@@ -3191,7 +3263,14 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
 
   <!-- v4.3.2 NEW: Snapshoty napeti clanku pri SOC 99% (FULL) a 20% (LOW) -->
   <div class="section">
-    <div class="section-title"><h2>Snapshoty FULL ↔ LOW <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(odhalení slabého článku)</span></h2></div>
+    <div class="section-title">
+      <h2>Snapshoty FULL ↔ LOW <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(odhalení slabého článku)</span></h2>
+      <div style="display:flex;gap:6px;">
+        <button class="download-btn" onclick="manualSnapshot('FULL')" title="Ulož aktuální stav jako FULL (plně nabito)">+ FULL</button>
+        <button class="download-btn" onclick="manualSnapshot('LOW')" title="Ulož aktuální stav jako LOW (vybito)">+ LOW</button>
+        <button class="download-btn" onclick="manualSnapshot('MANUAL')" title="Ulož aktuální stav (např. před údržbou)">+ TEĎ</button>
+      </div>
+    </div>
     <div id="snapshotsPanel" class="info-card" style="padding: 16px;">
       <div style="color:var(--text-muted);text-align:center;font-size:12px;">načítám snapshoty…</div>
     </div>
@@ -5423,6 +5502,28 @@ function renderEngineStatus(es) {
     }
   } catch (e) {
     console.warn('cellsPanel render error:', e);
+  }
+}
+
+// v4.3.2 NEW: Manualni snapshot - tlacitka v hlavicce panelu
+async function manualSnapshot(snapType) {
+  var labelMap = { FULL: 'jako FULL', LOW: 'jako LOW', MANUAL: 'aktuální stav' };
+  if (!confirm('Uložit ' + (labelMap[snapType] || 'snapshot') + ' do historie?')) return;
+  try {
+    var r = await fetch('/api/seplos/snapshot/manual', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ type: snapType }),
+    });
+    if (!r.ok) {
+      var txt = await r.text();
+      toast('Chyba: ' + txt, 'error');
+      return;
+    }
+    toast('Snapshot ' + snapType + ' uložen', 'success');
+    renderSnapshots();
+  } catch (e) {
+    toast('Chyba sítě: ' + e.message, 'error');
   }
 }
 

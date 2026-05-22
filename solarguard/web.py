@@ -28,9 +28,119 @@ log = logging.getLogger("web")
 # Cesta ke statickym souborum (manifest, SW, ikony)
 STATIC_DIR = Path(__file__).parent / "static"
 
+# v4.3.2 NEW: cesta pro snapshoty napeti clanku pri SOC 99% a 20% (persistence pres restarty)
+SNAPSHOT_PATH = Path("data") / "cell_snapshots.jsonl"
+SNAPSHOT_FULL_THRESHOLD = 99.0   # SOC% - kdyz vystoupa nad, ulozi snapshot "FULL"
+SNAPSHOT_LOW_THRESHOLD  = 20.0   # SOC% - kdyz klesne pod, ulozi snapshot "LOW"
+SNAPSHOT_HYSTERESIS     = 5.0    # vrat SOC zpet pres tuto hranici neez znova logovat
+SNAPSHOT_MAX_RECORDS    = 100    # in-memory deque cap; soubor neorezavame
 
 tick_history: Deque[Dict[str, Any]] = deque(maxlen=3000)
 event_history: Deque[Dict[str, Any]] = deque(maxlen=500)
+
+# v4.3.2 NEW: in-memory cache snapshotu napeti clanku (load z JSONL pri startu)
+_seplos_snapshots: Deque[Dict[str, Any]] = deque(maxlen=SNAPSHOT_MAX_RECORDS)
+_seplos_last_soc: Optional[float] = None  # pro detekci prechodu pres hranice
+_seplos_full_armed: bool = True   # pripraveny logovat FULL? (False kdyz uz logovano, dokud SOC neklesne pod 99-hyst)
+_seplos_low_armed: bool = True    # pripraveny logovat LOW?
+
+
+def _load_snapshots_from_disk() -> None:
+    """Pri startu nahraj posledni snapshoty z JSONL souboru do in-memory cache."""
+    global _seplos_snapshots
+    try:
+        if not SNAPSHOT_PATH.exists():
+            return
+        with open(SNAPSHOT_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+        # Vezmi jen posledni N
+        for line in lines[-SNAPSHOT_MAX_RECORDS:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                import json as _json
+                rec = _json.loads(line)
+                _seplos_snapshots.append(rec)
+            except Exception:
+                pass
+        log.info(f"Loaded {len(_seplos_snapshots)} cell snapshots from {SNAPSHOT_PATH}")
+    except Exception as e:
+        log.warning(f"Snapshot load failed: {e}")
+
+
+def _write_snapshot(snapshot: dict) -> None:
+    """Append snapshot do JSONL a in-memory cache."""
+    global _seplos_snapshots
+    try:
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        with open(SNAPSHOT_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(snapshot, ensure_ascii=False) + "\n")
+        _seplos_snapshots.append(snapshot)
+        log.info(f"Cell snapshot saved: {snapshot.get('type')} @ SOC {snapshot.get('soc'):.1f}%")
+    except Exception as e:
+        log.warning(f"Snapshot write failed: {e}")
+
+
+def _check_snapshot(ctx) -> None:
+    """Detekuje prechody SOC pres FULL/LOW hranice a ulozi snapshot napeti vsech clanku.
+
+    FULL snapshot: SOC vystoupa nad SNAPSHOT_FULL_THRESHOLD (99%).
+    LOW snapshot:  SOC klesne pod SNAPSHOT_LOW_THRESHOLD (20%).
+    Hystereze: dalsi snapshot stejneho typu az kdyz se SOC vrati o SNAPSHOT_HYSTERESIS od hranice.
+    """
+    global _seplos_last_soc, _seplos_full_armed, _seplos_low_armed
+    try:
+        sep = ctx.seplos
+        soc = ctx.victron.soc_pct
+        if soc is None or sep is None or not sep.online or not sep.pack_cell_voltages:
+            return
+
+        # Hystereze - rearm flagy
+        if soc < SNAPSHOT_FULL_THRESHOLD - SNAPSHOT_HYSTERESIS:
+            _seplos_full_armed = True
+        if soc > SNAPSHOT_LOW_THRESHOLD + SNAPSHOT_HYSTERESIS:
+            _seplos_low_armed = True
+
+        # Detekce prechodu
+        trigger_type = None
+        if soc >= SNAPSHOT_FULL_THRESHOLD and _seplos_full_armed:
+            trigger_type = "FULL"
+            _seplos_full_armed = False
+        elif soc <= SNAPSHOT_LOW_THRESHOLD and _seplos_low_armed:
+            trigger_type = "LOW"
+            _seplos_low_armed = False
+
+        _seplos_last_soc = soc
+        if trigger_type is None:
+            return
+
+        # Sestav snapshot
+        flat = sep.all_cells_flat if hasattr(sep, "all_cells_flat") else []
+        snapshot = {
+            "ts": time.time(),
+            "type": trigger_type,
+            "soc": soc,
+            "battery_power_w": ctx.victron.battery_power_w,
+            "pack_count": len(sep.pack_cell_voltages),
+            "cells_per_pack": len(sep.pack_cell_voltages[0]) if sep.pack_cell_voltages else 0,
+            "all_cells": flat,
+            "pack_voltages": list(sep.pack_voltages) if sep.pack_voltages else [],
+            "pack_temperatures": list(sep.pack_temperatures) if sep.pack_temperatures else [],
+            "min_cell_voltage": sep.min_cell_voltage,
+            "max_cell_voltage": sep.max_cell_voltage,
+            "min_cell_pack": sep.min_cell_pack,
+            "min_cell_index": sep.min_cell_index,
+            "max_cell_pack": sep.max_cell_pack,
+            "max_cell_index": sep.max_cell_index,
+            "spread_mv": round((sep.max_cell_voltage - sep.min_cell_voltage) * 1000, 1)
+                if sep.max_cell_voltage and sep.min_cell_voltage else None,
+        }
+        _write_snapshot(snapshot)
+    except Exception as e:
+        log.warning(f"_check_snapshot error: {e}")
+
 
 _spa_controller = None
 _cleaning_manager = None
@@ -172,6 +282,8 @@ def record_tick(ctx: SystemContext, decision_reason: str = "") -> None:
     except Exception:
         pass
     tick_history.append(entry)
+    # v4.3.2 NEW: zkontroluj prechody SOC pro snapshoty napeti clanku
+    _check_snapshot(ctx)
 
 
 def record_event(event_type: str, **fields) -> None:
@@ -213,6 +325,8 @@ class PreShowerStartReq(BaseModel):
 def create_app(ctx: SystemContext, config: dict) -> FastAPI:
     app = FastAPI(title="SolarGuard")
     set_config_ref(config)
+    # v4.3.2 NEW: nahraj snapshoty napeti clanku z disku (pri startu)
+    _load_snapshots_from_disk()
 
     # v3.9 NEW: dependencies pro auth (write = POST/PUT/DELETE, read = GET)
     def auth_write(request: Request) -> None:
@@ -534,6 +648,21 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
     @app.get("/api/events")
     async def api_events():
         return JSONResponse({"events": list(event_history)[::-1]})
+
+    # v4.3.2 NEW: snapshoty napeti clanku pri SOC 99% (FULL) a 20% (LOW)
+    @app.get("/api/seplos/snapshots")
+    async def api_seplos_snapshots(limit: int = 20):
+        # Vrat nejnovejsi snapshoty (newest first)
+        snaps = list(_seplos_snapshots)[-limit:][::-1]
+        # Pro UI: najdi posledni FULL a posledni LOW pro porovnani
+        last_full = next((s for s in snaps if s.get("type") == "FULL"), None)
+        last_low  = next((s for s in snaps if s.get("type") == "LOW"), None)
+        return {
+            "count": len(_seplos_snapshots),
+            "snapshots": snaps,
+            "last_full": last_full,
+            "last_low": last_low,
+        }
 
     @app.get("/api/appliances")
     async def api_appliances():
@@ -3060,6 +3189,14 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
     </div>
   </div>
 
+  <!-- v4.3.2 NEW: Snapshoty napeti clanku pri SOC 99% (FULL) a 20% (LOW) -->
+  <div class="section">
+    <div class="section-title"><h2>Snapshoty FULL ↔ LOW <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(odhalení slabého článku)</span></h2></div>
+    <div id="snapshotsPanel" class="info-card" style="padding: 16px;">
+      <div style="color:var(--text-muted);text-align:center;font-size:12px;">načítám snapshoty…</div>
+    </div>
+  </div>
+
   <!-- Existujici - posledni rozhodnuti -->
   <div class="section">
     <div class="section-title"><h2>Posledních 200 rozhodnutí</h2><a href="/api/export.csv" download class="download-btn">CSV</a></div>
@@ -3917,6 +4054,8 @@ async function refresh() {
       ]);
       renderDecisions(d.ticks);
       if (engineStatus) renderEngineStatus(engineStatus);
+      // v4.3.2 NEW: snapshoty napeti clanku (samostatny fetch, v try aby nezablokoval zbytek)
+      renderSnapshots();
     } else if (activeTab === 'events') {
       const e = await fetch('/api/events').then(r => r.json());
       renderEvents(e.events);
@@ -5284,6 +5423,123 @@ function renderEngineStatus(es) {
     }
   } catch (e) {
     console.warn('cellsPanel render error:', e);
+  }
+}
+
+// v4.3.2 NEW: Render porovnani FULL vs LOW snapshotu - odhali clanek s nejvetsim poklesem
+async function renderSnapshots() {
+  var panel = document.getElementById('snapshotsPanel');
+  if (!panel) return;
+  try {
+    var data = await fetch('/api/seplos/snapshots?limit=20').then(function(r) { return r.json(); });
+    var snaps = data.snapshots || [];
+    var full = data.last_full;
+    var low = data.last_low;
+
+    if (snaps.length === 0) {
+      panel.innerHTML = '<div style="color:var(--text-muted);text-align:center;font-size:12px;padding:14px;line-height:1.6;">'
+        + 'Zatím žádný snapshot. <br>'
+        + 'První FULL se uloží při dosažení SOC ≥99 %, první LOW při poklesu pod 20 %.<br>'
+        + '<span style="color:var(--text-dim)">Snapshoty se ukládají do <code>data/cell_snapshots.jsonl</code> a přežijí restart.</span>'
+        + '</div>';
+      return;
+    }
+
+    var html = '<div style="margin-bottom:10px;font-size:11px;color:var(--text-muted);font-family:var(--mono);letter-spacing:0.5px;">'
+             + 'celkem snapshotů: <strong>' + data.count + '</strong></div>';
+
+    // Hlavni vychytavka: porovnani posledniho FULL a LOW snapshotu
+    if (full && low) {
+      var fullCells = full.all_cells || [];
+      var lowCells = low.all_cells || [];
+      // Map cells by "P{pack}C{cell}" pro lookup
+      var lowMap = {};
+      for (var li = 0; li < lowCells.length; li++) {
+        var lc = lowCells[li];
+        lowMap['P' + lc.pack + 'C' + lc.cell] = lc.v;
+      }
+      // Spocitej delta = full.v - low.v pro kazdou bunku, najdi max delta = nejslabsi
+      var deltas = [];
+      for (var fi = 0; fi < fullCells.length; fi++) {
+        var fc = fullCells[fi];
+        var lowV = lowMap['P' + fc.pack + 'C' + fc.cell];
+        if (lowV == null) continue;
+        var dropMv = Math.round((fc.v - lowV) * 1000);
+        deltas.push({ pack: fc.pack, cell: fc.cell, fullV: fc.v, lowV: lowV, dropMv: dropMv });
+      }
+      deltas.sort(function(a, b) { return b.dropMv - a.dropMv; });
+
+      var fullDate = new Date(full.ts * 1000).toLocaleString('cs-CZ', { dateStyle:'short', timeStyle:'short' });
+      var lowDate  = new Date(low.ts  * 1000).toLocaleString('cs-CZ', { dateStyle:'short', timeStyle:'short' });
+
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">'
+            + '<div style="padding:10px 12px;background:rgba(34,197,94,.08);border:1px solid var(--success);border-radius:8px;">'
+            +   '<div style="font-size:10px;letter-spacing:1.5px;color:var(--success);font-weight:700;margin-bottom:4px;">🔋 FULL @ SOC ' + full.soc.toFixed(1) + '%</div>'
+            +   '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted);">' + fullDate + '</div>'
+            +   '<div style="font-family:var(--mono);font-size:11px;margin-top:4px;">min: ' + (full.min_cell_voltage||0).toFixed(3) + ' V · max: ' + (full.max_cell_voltage||0).toFixed(3) + ' V · spread ' + (full.spread_mv || '?') + ' mV</div>'
+            + '</div>'
+            + '<div style="padding:10px 12px;background:rgba(37,99,235,.08);border:1px solid var(--primary);border-radius:8px;">'
+            +   '<div style="font-size:10px;letter-spacing:1.5px;color:var(--primary);font-weight:700;margin-bottom:4px;">🪫 LOW @ SOC ' + low.soc.toFixed(1) + '%</div>'
+            +   '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted);">' + lowDate + '</div>'
+            +   '<div style="font-family:var(--mono);font-size:11px;margin-top:4px;">min: ' + (low.min_cell_voltage||0).toFixed(3) + ' V · max: ' + (low.max_cell_voltage||0).toFixed(3) + ' V · spread ' + (low.spread_mv || '?') + ' mV</div>'
+            + '</div>'
+            + '</div>';
+
+      // Tabulka top 5 nejslabsich (nejvetsi drop)
+      if (deltas.length) {
+        var worst = deltas.slice(0, 5);
+        html += '<div style="font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:1.5px;margin-bottom:6px;">TOP 5 ČLÁNKŮ S NEJVĚTŠÍM POKLESEM (FULL → LOW)</div>'
+              + '<div style="font-family:var(--mono);font-size:12px;">';
+        for (var wi = 0; wi < worst.length; wi++) {
+          var w = worst[wi];
+          var medal = wi === 0 ? '🥇' : (wi === 1 ? '🥈' : (wi === 2 ? '🥉' : '  '));
+          // Vyssi drop = vetsi vnitrni odpor / nizsi kapacita -> cervena
+          var dropColor = w.dropMv > deltas[0].dropMv * 0.9 ? 'var(--danger)' : (wi < 2 ? 'var(--warning)' : 'var(--text)');
+          html += '<div style="display:grid;grid-template-columns:30px 70px 1fr 80px;gap:8px;padding:5px 8px;border-bottom:1px solid var(--border);align-items:center;">'
+                +   '<div>' + medal + '</div>'
+                +   '<div><strong>P' + w.pack + ' C' + w.cell + '</strong></div>'
+                +   '<div style="color:var(--text-muted);font-size:11px;">FULL ' + w.fullV.toFixed(3) + ' V → LOW ' + w.lowV.toFixed(3) + ' V</div>'
+                +   '<div style="text-align:right;color:' + dropColor + ';font-weight:700;">−' + w.dropMv + ' mV</div>'
+                + '</div>';
+        }
+        html += '</div>';
+        var hintCell = worst[0];
+        html += '<div style="margin-top:10px;padding:8px 12px;background:var(--surface);border-radius:6px;font-size:11px;color:var(--text-muted);line-height:1.5;">'
+              + 'ℹ Článek <strong>P' + hintCell.pack + ' C' + hintCell.cell + '</strong> má největší pokles napětí mezi nabitým a vybitým stavem (' + hintCell.dropMv + ' mV). '
+              + 'Pokud je tento článek opakovaně na vrcholu, má pravděpodobně nižší kapacitu nebo vyšší vnitřní odpor než ostatní.'
+              + '</div>';
+      }
+    } else {
+      // Mame jenom jeden typ snapshotu
+      html += '<div style="padding:10px 12px;background:var(--surface);border-radius:6px;font-size:12px;color:var(--text-muted);line-height:1.6;">'
+            + 'Pro porovnání potřebuji <strong>oba</strong> snapshoty: '
+            + (full ? '✓ FULL' : '<span style="color:var(--warning)">? FULL (čeká na SOC ≥99%)</span>')
+            + ' &nbsp; '
+            + (low ? '✓ LOW' : '<span style="color:var(--warning)">? LOW (čeká na SOC ≤20%)</span>')
+            + '</div>';
+    }
+
+    // Seznam vsech snapshotu (kompaktni)
+    html += '<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted);letter-spacing:1px;text-transform:uppercase;font-weight:700;">Historie snapshotů (' + snaps.length + ')</summary>'
+          + '<div style="margin-top:8px;font-family:var(--mono);font-size:11px;">';
+    for (var si = 0; si < snaps.length; si++) {
+      var sn = snaps[si];
+      var dt = new Date(sn.ts * 1000).toLocaleString('cs-CZ', { dateStyle:'short', timeStyle:'short' });
+      var typeBadge = sn.type === 'FULL'
+        ? '<span style="background:rgba(34,197,94,.15);color:var(--success);padding:1px 6px;border-radius:4px;font-weight:700;">FULL</span>'
+        : '<span style="background:rgba(37,99,235,.15);color:var(--primary);padding:1px 6px;border-radius:4px;font-weight:700;">LOW</span>';
+      html += '<div style="display:grid;grid-template-columns:60px 110px 1fr;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);">'
+            +   '<div>' + typeBadge + '</div>'
+            +   '<div style="color:var(--text-muted);">' + dt + '</div>'
+            +   '<div>SOC ' + sn.soc.toFixed(1) + '% · spread ' + (sn.spread_mv || '?') + ' mV</div>'
+            + '</div>';
+    }
+    html += '</div></details>';
+
+    panel.innerHTML = html;
+  } catch (e) {
+    console.warn('renderSnapshots error:', e);
+    panel.innerHTML = '<div style="color:var(--danger);text-align:center;font-size:12px;">Chyba načítání snapshotů: ' + e.message + '</div>';
   }
 }
 

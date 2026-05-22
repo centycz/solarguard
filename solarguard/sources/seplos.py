@@ -167,6 +167,11 @@ class SeplosRS485:
                 frame = buf[idx:idx + frame_size]
                 if len(frame) == frame_size and _crc16(frame[:-2]) == frame[-2:]:
                     data = frame[3:-2]  # 18 bytu
+                    # DEBUG: cely PIC blok hex pro analyzu (jednorazove pri startup)
+                    if not hasattr(self, '_bal_dumped'):
+                        self._bal_dumped = True
+                        full_hex = ' '.join(f'{b:02x}' for b in data)
+                        log.info(f"Pack {pack_addr}: PIC blok ({len(data)}B): {full_hex}")
                     # Extract bity 96 az 96+cells_per_pack-1
                     # Modbus konvence: bit 0 = LSB byte[0], bit 8 = LSB byte[1], ...
                     flags = []
@@ -185,7 +190,8 @@ class SeplosRS485:
             if len(buf) > 512:
                 buf = buf[-256:]
 
-        # BMS neodpovedel - mlcky vrat None (nezasahuje hlavni funkcni cell read)
+        # BMS neodpovedel na FC=0x02 - log warning pro diagnostiku
+        log.warning(f"Pack {pack_addr:#04x}: balance read TIMEOUT - FC=0x02 frame nenalezen")
         return None
 
     def _parse_frame_data(self, data: bytes) -> dict:

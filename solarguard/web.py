@@ -92,6 +92,27 @@ def set_learning_manager(lm):
     global _learning_manager; _learning_manager = lm
 
 
+# v4.3.2 NEW: vrati nejcastejsi (pack, cell) ktery byl min nebo max za poslednich N hodin
+def _seplos_extreme_24h(field_pack: str, field_cell: str, hours: float = 24.0) -> Optional[dict]:
+    cutoff = time.time() - hours * 3600
+    counts: Dict[tuple, int] = {}
+    total = 0
+    for tick in tick_history:
+        if tick.get("ts", 0) < cutoff:
+            continue
+        pk = tick.get(field_pack)
+        cl = tick.get(field_cell)
+        if pk is None or cl is None:
+            continue
+        key = (pk, cl)
+        counts[key] = counts.get(key, 0) + 1
+        total += 1
+    if not counts or total == 0:
+        return None
+    (pk, cl), cnt = max(counts.items(), key=lambda kv: kv[1])
+    return {"pack": pk, "cell": cl, "count": cnt, "total_samples": total, "pct": round(cnt / total * 100, 1)}
+
+
 # v4.3.2 NEW: Seplos BMS data serializace pro JSON API (nikdy nehazi vyjimku)
 def _seplos_json(s) -> dict:
     try:
@@ -114,6 +135,9 @@ def _seplos_json(s) -> dict:
             "min_cell_index": s.min_cell_index,
             "max_cell_pack": s.max_cell_pack,
             "max_cell_index": s.max_cell_index,
+            # v4.3.2 NEW: Stitek hanby - kdo byl nejcasteji min/max za 24h
+            "weakest_24h": _seplos_extreme_24h("sep_min_pack", "sep_min_cell", 24.0),
+            "strongest_24h": _seplos_extreme_24h("sep_max_pack", "sep_max_cell", 24.0),
         }
     except Exception as e:
         log.warning(f"_seplos_json error: {e}")
@@ -122,7 +146,7 @@ def _seplos_json(s) -> dict:
 
 def record_tick(ctx: SystemContext, decision_reason: str = "") -> None:
     v = ctx.victron; s = ctx.spa; e = ctx.env; p = ctx.plan; c = ctx.cleaning
-    tick_history.append({
+    entry = {
         "ts": time.time(), "state": ctx.current_state.value,
         "soc": v.soc_pct, "pv": v.pv_power_w, "surplus": v.surplus_w,
         "load": v.load_total_w, "battery_power": v.battery_power_w, "grid": v.grid_total_w,
@@ -133,7 +157,21 @@ def record_tick(ctx: SystemContext, decision_reason: str = "") -> None:
         "wind_kmh": e.wind_kmh, "is_raining": e.is_raining,
         "strategy": p.strategy.value if p.strategy else None,
         "cleaning_running": c.is_running,
-    })
+    }
+    # v4.3.2 NEW: Seplos snapshot do historie - pro graf spreadu a "weakest cell"
+    try:
+        sep = ctx.seplos
+        if sep and sep.online and sep.min_cell_voltage is not None and sep.max_cell_voltage is not None:
+            entry["sep_min_v"] = round(sep.min_cell_voltage, 4)
+            entry["sep_max_v"] = round(sep.max_cell_voltage, 4)
+            entry["sep_spread_mv"] = round((sep.max_cell_voltage - sep.min_cell_voltage) * 1000, 1)
+            entry["sep_min_pack"] = sep.min_cell_pack
+            entry["sep_min_cell"] = sep.min_cell_index
+            entry["sep_max_pack"] = sep.max_cell_pack
+            entry["sep_max_cell"] = sep.max_cell_index
+    except Exception:
+        pass
+    tick_history.append(entry)
 
 
 def record_event(event_type: str, **fields) -> None:
@@ -5153,11 +5191,31 @@ function renderEngineStatus(es) {
         var spreadMv = Math.round((maxV - minV) * 1000);
         var spreadColor = spreadMv > 100 ? 'var(--danger)' : (spreadMv > 50 ? 'var(--warning)' : 'var(--success)');
 
+        // v4.3.2 NEW: prumer napeti pro heatmap (modra pod / cervena nad)
+        var avgV = 0;
+        for (var ai = 0; ai < cells.length; ai++) avgV += cells[ai].v;
+        avgV = avgV / cells.length;
+        // Maximalni odchylka od prumeru (pro normalizaci intenzity barvy)
+        var maxDeviation = Math.max(maxV - avgV, avgV - minV);
+        if (maxDeviation < 0.001) maxDeviation = 0.001; // div by zero guard
+
+        // Heatmap funkce: vraci CSS background podle odchylky napeti od prumeru
+        // Pod prumerem -> jemna modra, nad prumerem -> jemna cervena. Intenzita normalizovana.
+        function heatBg(v) {
+          var dev = v - avgV;
+          var intensity = Math.min(1, Math.abs(dev) / maxDeviation);
+          var alpha = (intensity * 0.35).toFixed(2); // max 35% saturace, jemne
+          if (dev < 0) return 'rgba(37, 99, 235, ' + alpha + ')';  // primary (modra)
+          if (dev > 0) return 'rgba(220, 38, 38, ' + alpha + ')';   // danger (cervena)
+          return 'var(--surface)';
+        }
+
         var html = '<div style="margin-bottom:12px;font-size:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;">'
           + '<span style="font-size:10px;background:rgba(34,197,94,.15);color:var(--success);padding:2px 8px;border-radius:20px;font-weight:700;letter-spacing:1px;">RS485 LIVE</span>'
           + '<span>' + sep.pack_count + ' pack × ' + sep.cells_per_pack + 'S = ' + cells.length + ' článků</span>'
           + '<span>min: <strong style="color:var(--primary);font-family:var(--mono)">' + minV.toFixed(3) + ' V</strong></span>'
           + '<span>max: <strong style="color:var(--success);font-family:var(--mono)">' + maxV.toFixed(3) + ' V</strong></span>'
+          + '<span>avg: <strong style="font-family:var(--mono)">' + avgV.toFixed(3) + ' V</strong></span>'
           + '<span>spread: <strong style="color:' + spreadColor + ';font-family:var(--mono)">' + spreadMv + ' mV</strong></span>'
           + '</div>';
 
@@ -5189,18 +5247,38 @@ function renderEngineStatus(es) {
             var isMin = (c.pack === sep.min_cell_pack && c.cell === sep.min_cell_index);
             var isMax = (c.pack === sep.max_cell_pack && c.cell === sep.max_cell_index);
             var border = isMin ? '2px solid var(--primary)' : (isMax ? '2px solid var(--success)' : '1px solid var(--border)');
-            var color = c.v < 3.0 ? 'var(--danger)' : (c.v > 3.55 ? 'var(--warning)' : 'var(--text)');
+            // Hard limity (bezpecnost) prebijou heatmap
+            var hardColor = c.v < 3.0 ? 'var(--danger)' : (c.v > 3.55 ? 'var(--warning)' : null);
+            var textColor = hardColor || 'var(--text)';
+            var bg = hardColor ? 'rgba(220,38,38,.15)' : heatBg(c.v);
             var badge = isMin ? '<div style="font-size:9px;color:var(--primary);font-weight:700;">MIN</div>'
                        : (isMax ? '<div style="font-size:9px;color:var(--success);font-weight:700;">MAX</div>'
                        : '<div style="font-size:9px;opacity:0">·</div>');
-            html += '<div style="background:var(--surface);border:' + border + ';border-radius:6px;padding:6px 3px;text-align:center;">'
+            html += '<div style="background:' + bg + ';border:' + border + ';border-radius:6px;padding:6px 3px;text-align:center;">'
               + '<div style="font-size:9px;color:var(--text-muted);margin-bottom:2px;">C' + c.cell + '</div>'
-              + '<div style="font-size:12px;font-weight:700;color:' + color + ';font-family:var(--mono);">' + c.v.toFixed(3) + '</div>'
+              + '<div style="font-size:12px;font-weight:700;color:' + textColor + ';font-family:var(--mono);">' + c.v.toFixed(3) + '</div>'
               + badge
               + '</div>';
           }
           html += '</div></div>';
         }
+
+        // v4.3.2 NEW: Stitek hanby - kdo byl nejcasteji min/max za poslednich 24h
+        var weak = sep.weakest_24h;
+        var strong = sep.strongest_24h;
+        if (weak || strong) {
+          html += '<div style="margin-top:6px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;font-family:var(--mono);color:var(--text-muted);line-height:1.6;">';
+          if (weak) {
+            html += '🔻 <strong style="color:var(--primary)">Nejslabší článek za 24h:</strong> P' + weak.pack + ' C' + weak.cell
+                  + ' &nbsp; <span style="color:var(--text-dim)">(' + weak.count + '×, ' + weak.pct + '% vzorků)</span><br>';
+          }
+          if (strong) {
+            html += '🔺 <strong style="color:var(--success)">Nejsilnější článek za 24h:</strong> P' + strong.pack + ' C' + strong.cell
+                  + ' &nbsp; <span style="color:var(--text-dim)">(' + strong.count + '×, ' + strong.pct + '% vzorků)</span>';
+          }
+          html += '</div>';
+        }
+
         cellsDiv.innerHTML = html;
       }
     }

@@ -5444,14 +5444,40 @@ function renderEngineStatus(es) {
         }
         packNums.sort(function(a, b) { return a - b; });
 
+        // Cerbo GX hodnoty (battery_power / pocet packu pro hruby per-pack odhad, SOC sdileny)
+        var ctxBat = (es.battery && es.battery.soc_pct != null) ? es.battery.soc_pct : null;
+        // battery_power = celkovy proud do/z baterie ze vsech packu dohromady
+        var totalBatW = (lastState && lastState.victron) ? lastState.victron.battery_power : null;
+        var packAvgV = sep.pack_voltages && sep.pack_voltages[0] ? sep.pack_voltages[0] : null;
+
         for (var pi = 0; pi < packNums.length; pi++) {
           var pn = packNums[pi];
           var idx = pn - 1;
           var packV = (sep.pack_voltages && sep.pack_voltages[idx] != null) ? sep.pack_voltages[idx].toFixed(2) + ' V' : '—';
-          var packA = (sep.pack_currents && sep.pack_currents[idx] != null) ? sep.pack_currents[idx].toFixed(1) + ' A' : '—';
-          var packSoc = (sep.pack_soc && sep.pack_soc[idx] != null) ? sep.pack_soc[idx].toFixed(0) + ' %' : '—';
+          // Pack proud: ze Seplos pokud existuje, jinak rozpocet celkoveho z Cerba mezi packy
+          var packA;
+          if (sep.pack_currents && sep.pack_currents[idx] != null) {
+            packA = sep.pack_currents[idx].toFixed(1) + ' A';
+          } else if (totalBatW != null && packAvgV) {
+            // Hruby odhad - delej proud rovnomerne mezi packy
+            var packAEst = (totalBatW / packAvgV) / packNums.length;
+            packA = packAEst.toFixed(1) + ' A <span style="font-size:9px;color:var(--text-dim)">~Cerbo</span>';
+          } else {
+            packA = '—';
+          }
+          // SOC: ze Seplos pokud existuje, jinak SOC celkove z Cerba (sdileny pres packy)
+          var packSoc;
+          if (sep.pack_soc && sep.pack_soc[idx] != null) {
+            packSoc = sep.pack_soc[idx].toFixed(0) + ' %';
+          } else if (ctxBat != null) {
+            packSoc = ctxBat.toFixed(0) + ' % <span style="font-size:9px;color:var(--text-dim)">~Cerbo</span>';
+          } else {
+            packSoc = '—';
+          }
           var packTemps = (sep.pack_temperatures && sep.pack_temperatures[idx]) || [];
-          var tempStr = packTemps.length ? packTemps.map(function(t) { return t.toFixed(1) + '°'; }).join(' / ') : '—';
+          // Filtruj sentinel 0.0°C (BMS posila raw 2731 pro neprapojene NTC)
+          var validTemps = packTemps.filter(function(t) { return t !== 0; });
+          var tempStr = validTemps.length ? validTemps.map(function(t) { return t.toFixed(1) + '°'; }).join(' / ') : '—';
 
           html += '<div style="margin-bottom:14px;">'
             + '<div style="font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:1.5px;margin-bottom:6px;">'

@@ -324,6 +324,9 @@ class SeplosData:
     pack_currents: list = field(default_factory=list)        # [-16.5, -16.5]
     pack_soc: list = field(default_factory=list)             # [98.0, 98.0]
     pack_soh: list = field(default_factory=list)             # [100.0, 100.0]
+    # v4.3.2 NEW: aktivni balancing flags z PIC bloku (0x1200, bity 96-111)
+    # pack_balance_flags[pack_idx][cell_idx] = True kdyz BMS prave bleed-uje tu bunku
+    pack_balance_flags: list = field(default_factory=list)   # [[False, True, ...], [...]]
 
     min_cell_voltage: Optional[float] = None
     max_cell_voltage: Optional[float] = None

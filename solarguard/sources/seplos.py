@@ -121,6 +121,73 @@ class SeplosRS485:
         log.warning(f"Pack {pack_addr:#04x}: rámec nenalezen do timeoutu")
         return None
 
+    # ── Čtení balance flags (PIC blok 0x1200, bity 96-111) ──────────────────
+
+    def _read_balance(self, pack_addr: int) -> Optional[List[bool]]:
+        """Cte aktivni balancing flags pres Modbus FC=0x02 (Read Discrete Inputs).
+
+        Seplos V3 PIC blok zacina na 0x1200, 144 bitu celkem.
+        Bity 96-111 = balancing status clanku 1-16 (1 = aktivni bleed).
+
+        Vrati seznam cells_per_pack bool, nebo None pokud BMS neodpovedel.
+        """
+        # FC=0x02, start bit address 0x1200, count 144 bits
+        bit_count = 144
+        expected_bytes = (bit_count + 7) // 8  # = 18
+        req = struct.pack('>BBHH', pack_addr, 0x02, 0x1200, bit_count)
+        req += _crc16(req)
+
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.write(req)
+        except Exception as e:
+            log.error(f"serial write error (balance): {e}")
+            return None
+
+        # Ocekavany frame: {addr} 02 {byte_count} [18B data] [CRC2]
+        frame_size = 3 + expected_bytes + 2  # = 23
+        target = bytes([pack_addr, 0x02, expected_bytes])
+        buf = b''
+        deadline = time.time() + 1.0  # kratsi timeout - balance neni kriticke
+
+        while time.time() < deadline:
+            try:
+                chunk = self._ser.read(frame_size + 64)
+            except Exception as e:
+                log.error(f"serial read error (balance): {e}")
+                return None
+            if chunk:
+                buf += chunk
+
+            pos = 0
+            while pos <= len(buf) - frame_size:
+                idx = buf.find(target, pos)
+                if idx < 0:
+                    break
+                frame = buf[idx:idx + frame_size]
+                if len(frame) == frame_size and _crc16(frame[:-2]) == frame[-2:]:
+                    data = frame[3:-2]  # 18 bytu
+                    # Extract bity 96 az 96+cells_per_pack-1
+                    # Modbus konvence: bit 0 = LSB byte[0], bit 8 = LSB byte[1], ...
+                    flags = []
+                    for i in range(self.cells_per_pack):
+                        bit_idx = 96 + i
+                        byte_idx = bit_idx // 8
+                        bit_in_byte = bit_idx % 8
+                        if byte_idx >= len(data):
+                            flags.append(False)
+                        else:
+                            flags.append(bool(data[byte_idx] & (1 << bit_in_byte)))
+                    log.debug(f"Pack {pack_addr}: balance flags = {flags}")
+                    return flags
+                pos = idx + 1
+
+            if len(buf) > 512:
+                buf = buf[-256:]
+
+        # BMS neodpovedel - mlcky vrat None (nezasahuje hlavni funkcni cell read)
+        return None
+
     def _parse_frame_data(self, data: bytes) -> dict:
         """Parsuje data za hlavickou Modbus ramce.
 
@@ -234,6 +301,7 @@ class SeplosRS485:
                 return
 
         pack_cells, pack_temps, pack_v, pack_cur, pack_soc, pack_soh = [], [], [], [], [], []
+        pack_balance: list = []
         ok = 0
 
         for i in range(self.pack_count):
@@ -247,11 +315,17 @@ class SeplosRS485:
                 pack_soc.append(result.get('soc'))
                 pack_soh.append(result.get('soh'))
                 ok += 1
+                # Druhy Modbus dotaz na PIC blok (balance flags)
+                # Kratky delay aby RS485 stihl dokoncit predchozi response
+                time.sleep(0.1)
+                bal = self._read_balance(addr)
+                pack_balance.append(bal if bal is not None else [False] * self.cells_per_pack)
             else:
                 pack_cells.append([])
                 pack_temps.append([])
                 pack_v.append(None); pack_cur.append(None)
                 pack_soc.append(None); pack_soh.append(None)
+                pack_balance.append([False] * self.cells_per_pack)
 
         s = self.ctx.seplos
         s.pack_cell_voltages = pack_cells
@@ -260,8 +334,18 @@ class SeplosRS485:
         s.pack_currents = pack_cur
         s.pack_soc = pack_soc
         s.pack_soh = pack_soh
+        s.pack_balance_flags = pack_balance
         s.online = ok > 0
         s.last_update = time.time()
+
+        # Log balancing aktivity (kazdy poll, pokud nejaky bleed bezi)
+        active_balance = []
+        for pi, flags in enumerate(pack_balance):
+            for ci, on in enumerate(flags):
+                if on:
+                    active_balance.append(f"P{pi+1}C{ci+1}")
+        if active_balance:
+            log.info(f"Seplos balancing aktivni: {', '.join(active_balance)}")
 
         # Agregovaný min/max přes všechny packy
         flat = [

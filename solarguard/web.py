@@ -271,6 +271,8 @@ def _seplos_json(s) -> dict:
             "pack_currents": list(s.pack_currents) if s.pack_currents else [],
             "pack_soc": list(s.pack_soc) if s.pack_soc else [],
             "pack_temperatures": list(s.pack_temperatures) if s.pack_temperatures else [],
+            # v4.3.2 NEW: aktivni balancing z PIC bloku 0x1200 bity 96-111
+            "pack_balance_flags": list(getattr(s, 'pack_balance_flags', None) or []),
             "min_cell_voltage": s.min_cell_voltage,
             "max_cell_voltage": s.max_cell_voltage,
             "min_cell_pack": s.min_cell_pack,
@@ -5428,14 +5430,33 @@ function renderEngineStatus(es) {
           return 'var(--surface)';
         }
 
+        // v4.3.2 NEW: balance flags - posbiraj aktivni buňky
+        var balanceFlags = sep.pack_balance_flags || [];
+        var activeBalancing = [];
+        for (var bpi = 0; bpi < balanceFlags.length; bpi++) {
+          var bp = balanceFlags[bpi] || [];
+          for (var bci = 0; bci < bp.length; bci++) {
+            if (bp[bci]) activeBalancing.push({ pack: bpi + 1, cell: bci + 1 });
+          }
+        }
+
         var html = '<div style="margin-bottom:12px;font-size:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;">'
           + '<span style="font-size:10px;background:rgba(34,197,94,.15);color:var(--success);padding:2px 8px;border-radius:20px;font-weight:700;letter-spacing:1px;">RS485 LIVE</span>'
           + '<span>' + sep.pack_count + ' pack × ' + sep.cells_per_pack + 'S = ' + cells.length + ' článků</span>'
           + '<span>min: <strong style="color:var(--primary);font-family:var(--mono)">' + minV.toFixed(3) + ' V</strong></span>'
           + '<span>max: <strong style="color:var(--success);font-family:var(--mono)">' + maxV.toFixed(3) + ' V</strong></span>'
           + '<span>avg: <strong style="font-family:var(--mono)">' + avgV.toFixed(3) + ' V</strong></span>'
-          + '<span>spread: <strong style="color:' + spreadColor + ';font-family:var(--mono)">' + spreadMv + ' mV</strong></span>'
-          + '</div>';
+          + '<span>spread: <strong style="color:' + spreadColor + ';font-family:var(--mono)">' + spreadMv + ' mV</strong></span>';
+
+        // Badge: aktivni balancing
+        if (activeBalancing.length > 0) {
+          var balList = activeBalancing.map(function(b) { return 'P' + b.pack + 'C' + b.cell; }).join(', ');
+          html += '<span style="font-size:11px;background:rgba(234,88,12,.15);color:var(--warning);padding:3px 10px;border-radius:20px;font-weight:700;">🔥 balancuje: ' + balList + '</span>';
+        } else if (balanceFlags.length > 0) {
+          html += '<span style="font-size:10px;color:var(--text-dim);">⚪ balancing neaktivní</span>';
+        }
+
+        html += '</div>';
 
         // Seskup po packach
         var packNums = [];
@@ -5490,14 +5511,28 @@ function renderEngineStatus(es) {
             if (c.pack !== pn) continue;
             var isMin = (c.pack === sep.min_cell_pack && c.cell === sep.min_cell_index);
             var isMax = (c.pack === sep.max_cell_pack && c.cell === sep.max_cell_index);
-            var border = isMin ? '2px solid var(--primary)' : (isMax ? '2px solid var(--success)' : '1px solid var(--border)');
+            // v4.3.2 NEW: balance flag pro tuhle bunku
+            var packFlags = balanceFlags[c.pack - 1] || [];
+            var isBalancing = !!packFlags[c.cell - 1];
+            // Border: balancing > MIN > MAX > default
+            var border = isBalancing ? '2px solid var(--warning)'
+                        : (isMin ? '2px solid var(--primary)'
+                        : (isMax ? '2px solid var(--success)' : '1px solid var(--border)'));
             // Hard limity (bezpecnost) prebijou heatmap
             var hardColor = c.v < 3.0 ? 'var(--danger)' : (c.v > 3.55 ? 'var(--warning)' : null);
             var textColor = hardColor || 'var(--text)';
             var bg = hardColor ? 'rgba(220,38,38,.15)' : heatBg(c.v);
-            var badge = isMin ? '<div style="font-size:9px;color:var(--primary);font-weight:700;">MIN</div>'
-                       : (isMax ? '<div style="font-size:9px;color:var(--success);font-weight:700;">MAX</div>'
-                       : '<div style="font-size:9px;opacity:0">·</div>');
+            // Badge - balance prebije MIN/MAX (vznam: aktivni je dulezitejsi info)
+            var badge;
+            if (isBalancing) {
+              badge = '<div style="font-size:11px;line-height:1;margin-top:1px;" title="BMS aktivne bleeduje tuto bunku">🔥</div>';
+            } else if (isMin) {
+              badge = '<div style="font-size:9px;color:var(--primary);font-weight:700;">MIN</div>';
+            } else if (isMax) {
+              badge = '<div style="font-size:9px;color:var(--success);font-weight:700;">MAX</div>';
+            } else {
+              badge = '<div style="font-size:9px;opacity:0">·</div>';
+            }
             html += '<div style="background:' + bg + ';border:' + border + ';border-radius:6px;padding:6px 3px;text-align:center;">'
               + '<div style="font-size:9px;color:var(--text-muted);margin-bottom:2px;">C' + c.cell + '</div>'
               + '<div style="font-size:12px;font-weight:700;color:' + textColor + ';font-family:var(--mono);">' + c.v.toFixed(3) + '</div>'

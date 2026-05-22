@@ -208,15 +208,17 @@ class SeplosRS485:
             if len(buf) > 512:
                 buf = buf[-256:]
 
-        # Pri timeout dumpni co prislo (pro diagnostiku - mozna chybna odpoved)
-        if not hasattr(self, '_bal_timeout_dumped'):
-            self._bal_timeout_dumped = True
+        # Pri timeout dumpni jen jednou (pro diagnostiku)
+        if not hasattr(self, '_bal_timeout_logged') or self._bal_timeout_logged.get(fc, 0) < 1:
+            if not hasattr(self, '_bal_timeout_logged'):
+                self._bal_timeout_logged = {}
+            self._bal_timeout_logged[fc] = self._bal_timeout_logged.get(fc, 0) + 1
             if buf:
                 head_hex = ' '.join(f'{b:02x}' for b in buf[:64])
-                log.warning(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} TIMEOUT - "
-                           f"prislo {len(buf)}B raw: {head_hex}")
+                log.debug(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} timeout - "
+                         f"prislo {len(buf)}B raw: {head_hex}")
             else:
-                log.warning(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} TIMEOUT - prazdny buffer")
+                log.debug(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} timeout - prazdny buffer")
         return None
 
     def _parse_frame_data(self, data: bytes) -> dict:

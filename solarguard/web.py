@@ -5453,7 +5453,15 @@ function renderEngineStatus(es) {
           var balList = activeBalancing.map(function(b) { return 'P' + b.pack + 'C' + b.cell; }).join(', ');
           html += '<span style="font-size:11px;background:rgba(234,88,12,.15);color:var(--warning);padding:3px 10px;border-radius:20px;font-weight:700;">🔥 balancuje: ' + balList + '</span>';
         } else if (balanceFlags.length > 0) {
-          html += '<span style="font-size:10px;color:var(--text-dim);">⚪ balancing neaktivní</span>';
+          // Vysvetli proc nebalanžuje (jen orientacne - Seplos V3 bleed typicky 3.45-3.50V)
+          var hint;
+          if (maxV >= 3.45) {
+            hint = '⚪ balancing neaktivní (max ' + maxV.toFixed(3) + 'V - BMS bleed threshold možná vyšší)';
+          } else {
+            var deltaToBleed = (3.45 - maxV).toFixed(3);
+            hint = '⚪ balancing neaktivní (max ' + maxV.toFixed(3) + 'V, potřeba +' + deltaToBleed + 'V do bleed prahu)';
+          }
+          html += '<span style="font-size:10px;color:var(--text-dim);">' + hint + '</span>';
         }
 
         html += '</div>';

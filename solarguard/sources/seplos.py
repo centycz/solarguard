@@ -124,37 +124,57 @@ class SeplosRS485:
     # ── Čtení balance flags (PIC blok 0x1200, bity 96-111) ──────────────────
 
     def _read_balance(self, pack_addr: int) -> Optional[List[bool]]:
-        """Cte aktivni balancing flags pres Modbus FC=0x02 (Read Discrete Inputs).
+        """Cte aktivni balancing flags z Seplos V3 PIC bloku.
 
-        Seplos V3 PIC blok zacina na 0x1200, 144 bitu celkem.
+        PIC blok zacina na 0x1200, 144 bitu celkem.
         Bity 96-111 = balancing status clanku 1-16 (1 = aktivni bleed).
 
-        Vrati seznam cells_per_pack bool, nebo None pokud BMS neodpovedel.
+        Zkousime obe Modbus funkce ktere by mohly fungovat:
+        - FC=0x01 (Read Coils)
+        - FC=0x02 (Read Discrete Inputs)
+        - Pokud zna pack address jako 0-indexovanou, mozna potreba odecist 1
+          ale to neudelame - addr je u Seplosu pack number 1-based
+
+        Vrati list[bool] o delce cells_per_pack, nebo None.
         """
-        # FC=0x02, start bit address 0x1200, count 144 bits
+        # Postupne zkousime FC=0x01 a FC=0x02
+        for fc in (0x01, 0x02):
+            result = self._read_balance_with_fc(pack_addr, fc)
+            if result is not None:
+                # Zapamatujeme si fungujici FC pro pristi volani (uspora casu)
+                self._working_balance_fc = fc
+                return result
+        return None
+
+    def _read_balance_with_fc(self, pack_addr: int, fc: int) -> Optional[List[bool]]:
+        """Helper - jeden pokus s konkretni FC."""
         bit_count = 144
-        expected_bytes = (bit_count + 7) // 8  # = 18
-        req = struct.pack('>BBHH', pack_addr, 0x02, 0x1200, bit_count)
+        expected_bytes = (bit_count + 7) // 8  # 18
+
+        # Pokud uz mame fungujici FC zapamatovany a neni to ten o ktery zkousime, skip
+        if hasattr(self, '_working_balance_fc') and self._working_balance_fc != fc:
+            return None
+
+        req = struct.pack('>BBHH', pack_addr, fc, 0x1200, bit_count)
         req += _crc16(req)
 
         try:
             self._ser.reset_input_buffer()
             self._ser.write(req)
         except Exception as e:
-            log.error(f"serial write error (balance): {e}")
+            log.error(f"serial write error (balance FC={fc:#04x}): {e}")
             return None
 
-        # Ocekavany frame: {addr} 02 {byte_count} [18B data] [CRC2]
-        frame_size = 3 + expected_bytes + 2  # = 23
-        target = bytes([pack_addr, 0x02, expected_bytes])
+        frame_size = 3 + expected_bytes + 2  # 23
+        target = bytes([pack_addr, fc, expected_bytes])
         buf = b''
-        deadline = time.time() + 1.0  # kratsi timeout - balance neni kriticke
+        deadline = time.time() + 0.8
 
         while time.time() < deadline:
             try:
                 chunk = self._ser.read(frame_size + 64)
             except Exception as e:
-                log.error(f"serial read error (balance): {e}")
+                log.error(f"serial read error (balance FC={fc:#04x}): {e}")
                 return None
             if chunk:
                 buf += chunk
@@ -166,14 +186,13 @@ class SeplosRS485:
                     break
                 frame = buf[idx:idx + frame_size]
                 if len(frame) == frame_size and _crc16(frame[:-2]) == frame[-2:]:
-                    data = frame[3:-2]  # 18 bytu
-                    # DEBUG: cely PIC blok hex pro analyzu (jednorazove pri startup)
+                    data = frame[3:-2]
+                    # DEBUG jednorazove dumpni PIC blok
                     if not hasattr(self, '_bal_dumped'):
                         self._bal_dumped = True
                         full_hex = ' '.join(f'{b:02x}' for b in data)
-                        log.info(f"Pack {pack_addr}: PIC blok ({len(data)}B): {full_hex}")
-                    # Extract bity 96 az 96+cells_per_pack-1
-                    # Modbus konvence: bit 0 = LSB byte[0], bit 8 = LSB byte[1], ...
+                        log.info(f"Pack {pack_addr}: PIC blok via FC={fc:#04x} ({len(data)}B): {full_hex}")
+                    # Extract bity 96-111
                     flags = []
                     for i in range(self.cells_per_pack):
                         bit_idx = 96 + i
@@ -183,15 +202,21 @@ class SeplosRS485:
                             flags.append(False)
                         else:
                             flags.append(bool(data[byte_idx] & (1 << bit_in_byte)))
-                    log.debug(f"Pack {pack_addr}: balance flags = {flags}")
                     return flags
                 pos = idx + 1
 
             if len(buf) > 512:
                 buf = buf[-256:]
 
-        # BMS neodpovedel na FC=0x02 - log warning pro diagnostiku
-        log.warning(f"Pack {pack_addr:#04x}: balance read TIMEOUT - FC=0x02 frame nenalezen")
+        # Pri timeout dumpni co prislo (pro diagnostiku - mozna chybna odpoved)
+        if not hasattr(self, '_bal_timeout_dumped'):
+            self._bal_timeout_dumped = True
+            if buf:
+                head_hex = ' '.join(f'{b:02x}' for b in buf[:64])
+                log.warning(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} TIMEOUT - "
+                           f"prislo {len(buf)}B raw: {head_hex}")
+            else:
+                log.warning(f"Pack {pack_addr:#04x}: balance FC={fc:#04x} TIMEOUT - prazdny buffer")
         return None
 
     def _parse_frame_data(self, data: bytes) -> dict:

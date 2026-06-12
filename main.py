@@ -29,11 +29,6 @@ from solarguard.engine.scheduler import Scheduler, parse_rules_from_config
 from solarguard.engine.heating_curve import HeatingCurveTracker
 from solarguard.engine.preshower import PreShowerManager
 from solarguard.storage.logger import EventLogger, setup_logging
-from solarguard.storage.influx import (
-    InfluxWriter,
-    write_solar_metrics, write_spa_metrics, write_env_metrics,
-    write_decision_metrics, write_spot_metrics, write_heating_sample,
-)
 from solarguard.auth import init_auth, AuthConfig
 from solarguard.insights.anomaly import AnomalyDetector
 from solarguard.insights.digest import DigestGenerator
@@ -43,6 +38,9 @@ from solarguard.web import (
     set_heatpump_controller, set_heatpump_engine,
     set_learning_manager,
 )
+
+
+VERSION = "4.4.0"
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -249,17 +247,8 @@ class SolarGuard:
             web_record_event=record_event,
         )
 
-        # v3.8 NEW: InfluxDB writer (volitelne, default off)
-        self.influx = None
-        ic = cfg.get("influxdb", {})
-        if ic.get("enabled", False):
-            self.influx = InfluxWriter(
-                url=ic["url"],
-                org=ic["org"],
-                bucket=ic["bucket"],
-                token=ic["token"],
-                location_tag=ic.get("location_tag", "bojanovice"),
-            )
+        # v4.4.0: InfluxDB/Grafana podpora odstranena (nepouzivala se).
+        # Obnova: git revert commitu "chore: odstraneni InfluxDB/Grafana"
 
         # v4.0 NEW: Anomaly detector (vede 14-day rolling window denních souhrnů)
         self.anomaly = AnomalyDetector(
@@ -358,9 +347,6 @@ class SolarGuard:
         from solarguard.web import set_heating_curve, set_preshower
         set_heating_curve(self.heating_curve)
         set_preshower(self.preshower)
-        # v3.8 NEW
-        from solarguard.web import set_influx
-        set_influx(self.influx)
         # v4.0 NEW
         from solarguard.web import set_anomaly, set_digest
         set_anomaly(self.anomaly)
@@ -524,17 +510,6 @@ class SolarGuard:
 
         record_tick(self.ctx, decision.reason)
 
-        # v3.8 NEW: Send metrics to InfluxDB (each tick = 30s)
-        if self.influx:
-            try:
-                write_solar_metrics(self.influx, self.ctx)
-                write_spa_metrics(self.influx, self.ctx)
-                write_env_metrics(self.influx, self.ctx)
-                write_decision_metrics(self.influx, self.ctx, decision.reason)
-                write_spot_metrics(self.influx, self.ctx)
-            except Exception as e:
-                self.log.error(f"InfluxDB write error: {e}")
-
         # v3.7 NEW: heating curve tracking
         # Detekujeme prechod heater False->True (start ohrevu) a True->False (konec)
         current_heater = self.ctx.spa.heater_on
@@ -550,19 +525,10 @@ class SolarGuard:
         elif self._last_heater_state is True and current_heater is False:
             # Konec topeni
             if self.ctx.spa.current_temp_c is not None:
-                sample = self.heating_curve.on_heating_stop(
+                self.heating_curve.on_heating_stop(
                     current_temp=self.ctx.spa.current_temp_c,
                     reason=decision.reason or "auto",
                 )
-                # v3.8: poslat heating sample do InfluxDB
-                if sample and self.influx:
-                    try:
-                        write_heating_sample(
-                            self.influx, sample,
-                            self.heating_curve.get_model_info()
-                        )
-                    except Exception as e:
-                        self.log.error(f"heating sample influx write error: {e}")
         self._last_heater_state = current_heater
 
         if decision.set_target_temp is not None \
@@ -674,18 +640,17 @@ class SolarGuard:
 
     async def run(self):
         self.log.info("=" * 50)
-        self.log.info(f"SolarGuard v4.3.0 starting (dry_run={self.dry_run})")
+        self.log.info(f"SolarGuard v{VERSION} starting (dry_run={self.dry_run})")
         if not self.dry_run:
             self.log.warning(">>> OSTRY PROVOZ - virivka bude REALNE ovladana <<<")
         self.log.info("=" * 50)
-        self.events.log("startup", dry_run=self.dry_run, version="v4.1.1")
+        self.events.log("startup", dry_run=self.dry_run, version=f"v{VERSION}")
 
         await self.victron.start()
         await self.spa.connect()
         if self.loxone: await self.loxone.start()
         if self.openmeteo: await self.openmeteo.start()
         if self.ote: await self.ote.start()
-        if self.influx: await self.influx.start()
         # v4.3.0 NEW
         if self.h66: await self.h66.start()
         # v4.3.2 NEW: Seplos BMS RS485
@@ -734,7 +699,6 @@ class SolarGuard:
         if self.loxone: await self.loxone.stop()
         if self.openmeteo: await self.openmeteo.stop()
         if self.ote: await self.ote.stop()
-        if self.influx: await self.influx.stop()
         if self.planner: await self.planner.stop()
         if self.scheduler: await self.scheduler.stop()
         if self.h66: await self.h66.stop()  # v4.3.0 NEW

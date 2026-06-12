@@ -110,14 +110,6 @@ api:
   auth_read_too: false
   allow_localhost: true
 
-influxdb:
-  enabled: false
-  url: "http://localhost:8086"
-  org: "home"
-  bucket: "solarguard"
-  token: "ZMENNAME-PRES-INFLUXDB-UI"
-  location_tag: "bojanovice"
-
 insights:
   window_days: 14
   min_baseline_days: 3

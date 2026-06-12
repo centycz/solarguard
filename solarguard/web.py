@@ -180,7 +180,6 @@ _appliance_evaluator = None
 _scheduler = None
 _heating_curve = None
 _preshower = None
-_influx = None
 _anomaly = None
 _digest = None
 _config_ref = None
@@ -209,9 +208,6 @@ def set_heating_curve(hc):
 
 def set_preshower(ps):
     global _preshower; _preshower = ps
-
-def set_influx(infl):
-    global _influx; _influx = infl
 
 def set_anomaly(a):
     global _anomaly; _anomaly = a
@@ -1330,13 +1326,6 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
         if not result.get("ok"):
             raise HTTPException(400, result.get("reason", "unknown"))
         return result
-
-    # ===== v3.8 NEW: InfluxDB stats API =====
-    @app.get("/api/influx/stats")
-    async def api_influx_stats():
-        if _influx is None:
-            return {"available": False, "configured": False}
-        return _influx.stats
 
     # ===== v3.9 NEW: Auth =====
     @app.get("/api/auth/status")
@@ -3662,15 +3651,9 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
     <div id="cfgInfoMobile" class="info-card"></div>
   </div>
 
-  <!-- v3.8 NEW: InfluxDB status -->
-  <div class="section">
-    <div class="section-title"><h2>🗄 Long-term storage</h2></div>
-    <div id="influxStatusCard" class="info-card"></div>
-  </div>
-
   <div class="section" style="text-align: center; margin-top: 24px;">
     <div style="font-family: var(--mono); font-size: 9px; color: var(--text-dim); letter-spacing: 1px;">
-      SolarGuard v4.3.0 · Bojanovice
+      SolarGuard v4.4.0 · Bojanovice
     </div>
     <div style="font-family: var(--mono); font-size: 9px; color: var(--text-dim); margin-top: 4px;">
       auto-refresh 5 s
@@ -3678,7 +3661,7 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
   </div>
 </div>
 
-<footer>SolarGuard v4.3.0 · Bojanovice · auto-refresh 5 s</footer>
+<footer>SolarGuard v4.4.0 · Bojanovice · auto-refresh 5 s</footer>
 </div>
 
 <!-- v3.5 NEW: Mobile bottom navigation -->
@@ -4402,40 +4385,6 @@ function renderOverview(s) {
   // v3.5 NEW: stejny config i v mobile "Více" tabu
   const cm = document.getElementById('cfgInfoMobile');
   if (cm) cm.innerHTML = cfgHtml;
-  // v3.8 NEW: InfluxDB status (jen pokud jsme na "more" tabu)
-  if (activeTab === 'more') {
-    renderInfluxStatus();
-  }
-}
-
-// v3.8 NEW: Render InfluxDB status badge v Více tabu
-async function renderInfluxStatus() {
-  const card = document.getElementById('influxStatusCard');
-  if (!card) return;
-  try {
-    const stats = await fetch('/api/influx/stats').then(r => r.json());
-    if (!stats.configured) {
-      card.innerHTML =
-        '<div class="info-row"><span class="info-label">Stav</span>' +
-        '<span class="info-value" style="color: var(--text-muted)">⚪ nenakonfigurováno</span></div>' +
-        '<div style="padding: 12px 16px; font-family: var(--mono); font-size: 10px; color: var(--text-muted); line-height: 1.5;">' +
-        'InfluxDB není zapnutá. Pro dlouhodobé grafy přes Grafanu zapni v <code>config.yaml</code> sekci <code>influxdb:</code>. Návod: <code>DEPLOY_v3.8.md</code></div>';
-      return;
-    }
-    const available = stats.available;
-    const badge = available
-      ? '<span style="color: var(--success); font-weight: 700;">● PŘIPOJENO</span>'
-      : '<span style="color: var(--warning); font-weight: 700;">● ODPOJENO (retry každou minutu)</span>';
-    card.innerHTML =
-      '<div class="info-row"><span class="info-label">Stav</span><span class="info-value">' + badge + '</span></div>' +
-      '<div class="info-row"><span class="info-label">URL</span><span class="info-value" style="font-size: 10px;">' + (stats.url || '—') + '</span></div>' +
-      '<div class="info-row"><span class="info-label">Zapsáno bodů</span><span class="info-value">' + (stats.total_written || 0).toLocaleString() + '</span></div>' +
-      '<div class="info-row"><span class="info-label">Buffer</span><span class="info-value">' + (stats.buffer_size || 0) + ' / 1000</span></div>' +
-      (stats.total_dropped ? '<div class="info-row"><span class="info-label">Zahozeno</span><span class="info-value" style="color: var(--warning)">' + stats.total_dropped + '</span></div>' : '') +
-      (stats.consecutive_failures ? '<div class="info-row"><span class="info-label">Pokusy o reconnect</span><span class="info-value" style="color: var(--warning)">' + stats.consecutive_failures + '</span></div>' : '');
-  } catch (e) {
-    card.innerHTML = '<div style="padding: 12px 16px; color: var(--text-muted); font-family: var(--mono); font-size: 11px;">Načítání selhalo: ' + e.message + '</div>';
-  }
 }
 
 // v4.3.0 NEW: cache aktivnich cyklu pro UI render (refreshovano kazdy refresh)

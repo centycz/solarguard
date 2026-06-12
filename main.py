@@ -170,6 +170,9 @@ class SolarGuard:
             bat_full_kickstart_enabled=sc.get("bat_full_kickstart_enabled", True),
             bat_full_kickstart_min_pv_w=sc.get("bat_full_kickstart_min_pv_w", 1000),
             bat_full_kickstart_min_load_w=sc.get("bat_full_kickstart_min_load_w", 500),
+            # v4.4.0 NEW: auto-expirace heat_now
+            heat_now_max_hours=sc.get("heat_now_max_hours", 8.0),
+            heat_now_linger_min=sc.get("heat_now_linger_min", 120),
         ))
 
         self.cleaning = CleaningManager(
@@ -368,10 +371,15 @@ class SolarGuard:
         """Naplanovany trigger - spousti scenu jako kdyby uzivatel klikl v UI."""
         try:
             self.log.info(f"Scheduler -> scene '{scene_id}' (target_temp_c={target_temp_c})")
+            # v4.4.0: naplanovana scena je explicitni prikaz - rusi manual-off hold
+            self.ctx.manual_heater_off_until = 0.0
+            self.ctx.override_started_at = 0.0
+            self.ctx.heat_now_target_reached_at = 0.0
             if scene_id == "heat_now":
                 self.ctx.override_active = True
                 self.ctx.override_reason = "schedule: heat_now"
                 self.ctx.current_scene = "heat_now"
+                self.ctx.override_started_at = time.time()
                 temp = target_temp_c or self.cfg.get("spa", {}).get("target_temp_c", 38)
                 self.ctx.target_temp_override = temp
                 await self.spa.set_filter(True, force=True)
@@ -398,6 +406,8 @@ class SolarGuard:
                 return True
             elif scene_id == "off":
                 # Specialni 'off' scena - vsechno vypnout
+                # (od v4.4.0 ji DecisionEngine respektuje - drive se topeni
+                # pri dalsim prebytku zase zapnulo)
                 self.ctx.override_active = False
                 self.ctx.override_reason = ""
                 self.ctx.current_scene = "off"

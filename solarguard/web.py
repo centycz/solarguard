@@ -407,6 +407,8 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
             # NEW v3.2: aktualni scena a cilova teplota
             "current_scene": getattr(ctx, "current_scene", "solar_auto"),
             "target_temp_override": getattr(ctx, "target_temp_override", None),
+            # v4.4.0 NEW: rucni vypnuti topeni - do kdy je automatika pozastavena
+            "manual_off_until": ctx.manual_heater_off_until if ctx.manual_heater_off_until > time.time() else None,
             "victron": {
                 "soc": v.soc_pct, "pv": v.pv_power_w, "surplus": v.surplus_w,
                 "load": v.load_total_w, "stale": v.is_stale,
@@ -984,16 +986,35 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
         await _check_spa()
         user = get_user(request)
         actor = user.name if user else "anonymous"
+        from .state import SystemState
         if req.value:
             ctx.manual_heater_started_at = time.time()
-            from .state import SystemState
+            # v4.4.0: rucni zapnuti rusi pripadny manual-off hold
+            ctx.manual_heater_off_until = 0.0
             if ctx.current_state != SystemState.HEATING:
                 ctx.transition(SystemState.HEATING, f"manual web heater ON by {actor}")
         else:
             ctx.manual_heater_started_at = 0.0
+            # v4.4.0 FIX: rucni vypnuti driv automatika do 30s prebila (STATE DRIFT
+            # fix v main.py videl state=HEATING + heater_on=False a topeni zase zapnul).
+            # Ted: prechod do IDLE + docasny hold, aby engine sam nezapinal.
+            hold_min = (_config_ref or {}).get("spa", {}).get("manual_off_hold_min", 240)
+            ctx.manual_heater_off_until = time.time() + hold_min * 60
+            # Pokud bezel heat_now override, rucni OFF ho ukonci (jinak by
+            # decide() na overridu skoncil a hold by se nikdy neuplatnil)
+            if ctx.override_active and ctx.current_scene == "heat_now":
+                ctx.override_active = False
+                ctx.override_reason = ""
+                ctx.current_scene = "solar_auto"
+                ctx.target_temp_override = None
+                ctx.override_started_at = 0.0
+                ctx.heat_now_target_reached_at = 0.0
+            if ctx.current_state == SystemState.HEATING:
+                ctx.transition(SystemState.IDLE, f"manual web heater OFF by {actor}")
         ok = await _spa_controller.set_heater(req.value, force=True)
         record_event("web_command", target="heater", value=req.value, success=ok, actor=actor)
-        return {"success": ok, "heater": ctx.spa.heater_on}
+        return {"success": ok, "heater": ctx.spa.heater_on,
+                "manual_off_until": ctx.manual_heater_off_until or None}
 
     @app.post("/api/spa/filter", dependencies=[Depends(auth_write)])
     async def set_filter(req: SetBoolRequest, request: Request):
@@ -1087,6 +1108,10 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
         ctx.current_scene = "heat_now"
         # v3.8.1: oznacit ze topeni je nas vlastni (suppress spike protection)
         ctx.manual_heater_started_at = time.time()
+        # v4.4.0: zrusit manual-off hold + nastartovat auto-expiraci
+        ctx.manual_heater_off_until = 0.0
+        ctx.override_started_at = time.time()
+        ctx.heat_now_target_reached_at = 0.0
         from .state import SystemState
         if ctx.current_state != SystemState.HEATING:
             ctx.transition(SystemState.HEATING, "scene: heat_now")
@@ -1105,6 +1130,10 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
         # NEW v3.2: solar_auto reset target na config (typicky 38)
         ctx.target_temp_override = None
         ctx.current_scene = "solar_auto"
+        # v4.4.0: vyber sceny rusi manual-off hold
+        ctx.manual_heater_off_until = 0.0
+        ctx.override_started_at = 0.0
+        ctx.heat_now_target_reached_at = 0.0
         target = _config_ref["spa"]["target_temp_c"] if _config_ref else 38
         await _spa_controller.set_target_temp(int(target))
         await _spa_controller.set_heater(False, force=True)
@@ -1125,9 +1154,33 @@ def create_app(ctx: SystemContext, config: dict) -> FastAPI:
         gentle_target = 33
         ctx.target_temp_override = gentle_target
         ctx.current_scene = "gentle"
+        # v4.4.0: vyber sceny rusi manual-off hold
+        ctx.manual_heater_off_until = 0.0
+        ctx.override_started_at = 0.0
+        ctx.heat_now_target_reached_at = 0.0
         await _spa_controller.set_target_temp(gentle_target)
         record_event("scene", name="gentle", target_temp=gentle_target)
         return {"success": True, "override_active": False, "target_temp": ctx.spa.target_temp_c, "current_scene": "gentle"}
+
+    @app.post("/api/spa/scene/off", dependencies=[Depends(auth_write)])
+    async def scene_off():
+        """v4.4.0 NEW: Vypnuto - topeni off a automatika nic nedela,
+        dokud uzivatel (nebo planovac) nevybere jinou scenu."""
+        await _check_spa()
+        ctx.override_active = False
+        ctx.override_reason = ""
+        ctx.target_temp_override = None
+        ctx.current_scene = "off"
+        ctx.manual_heater_started_at = 0.0
+        ctx.manual_heater_off_until = 0.0
+        ctx.override_started_at = 0.0
+        ctx.heat_now_target_reached_at = 0.0
+        from .state import SystemState
+        if ctx.current_state == SystemState.HEATING:
+            ctx.transition(SystemState.IDLE, "scene: off")
+        await _spa_controller.set_heater(False, force=True)
+        record_event("scene", name="off")
+        return {"success": True, "override_active": False, "current_scene": "off"}
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -3124,10 +3177,11 @@ footer { text-align: center; color: var(--text-dim); font-size: 10px; margin-top
         <div class="mode-card-meta" id="currentModeMeta">voda 28°C → cíl 38°C</div>
       </div>
     </div>
-    <div class="scene-row scene-row-3" style="margin-top: 10px;">
+    <div class="scene-row" style="margin-top: 10px;">
       <button class="scene-btn" onclick="sceneSolarAuto()" id="sceneAutoBtn"><span class="scene-title">☀ Solar auto</span><span class="scene-desc">FVE řízeno · 38°C</span></button>
       <button class="scene-btn" onclick="sceneGentle()" id="sceneGentleBtn"><span class="scene-title">🧒 Mírný</span><span class="scene-desc">Pro děti · 33°C</span></button>
       <button class="scene-btn" onclick="sceneHeatNow()" id="sceneHeatBtn"><span class="scene-title">♨ Ohřát hned</span><span class="scene-desc">Override · 38°C</span></button>
+      <button class="scene-btn" onclick="sceneOff()" id="sceneOffBtn"><span class="scene-title">⏻ Vypnout</span><span class="scene-desc">Žádná automatika</span></button>
     </div>
     <div id="schedulerStatusBar" class="scheduler-status-bar">
       <div class="scheduler-status-text">
@@ -3961,7 +4015,14 @@ function unflashButton(b) {
 async function setHeater(v, evt) {
   const b = flashButton(evt);
   optimisticSpaUpdate('heater', v);
-  await apiPost('/api/spa/heater', {value: v});
+  const resp = await apiPost('/api/spa/heater', {value: v});
+  // v4.4.0: rucni OFF pozastavi automatiku - dej uzivateli vedet do kdy
+  if (!v && resp && resp.manual_off_until) {
+    const until = new Date(resp.manual_off_until * 1000);
+    const hh = String(until.getHours()).padStart(2, '0');
+    const mm = String(until.getMinutes()).padStart(2, '0');
+    toast(`Topení vypnuto. Automatika pozastavena do ${hh}:${mm} · pro trvalé vypnutí použij režim Vypnout.`, 'info');
+  }
   unflashButton(b);
 }
 async function setFilter(v, evt) {
@@ -3997,6 +4058,10 @@ async function sceneHeatNow() {
   await apiPost('/api/spa/scene/heat_now');
 }
 async function sceneSolarAuto() { await apiPost('/api/spa/scene/solar_auto'); }
+async function sceneOff() {
+  if (!confirm('Vypnout vířivku? Automatika nebude topit, dokud nevybereš jiný režim.')) return;
+  await apiPost('/api/spa/scene/off');
+}
 
 // v3.7 NEW: Pre-shower funkce
 async function preshowerStart(eta_minutes) {
@@ -4995,6 +5060,14 @@ function renderCurrentModeCard(s) {
     modeMeta = `voda ${water || '?'}°C → cíl ${target || 38}°C`;
   }
 
+  // v4.4.0: rucni vypnuti topeni - ukaz do kdy je automatika pozastavena
+  if (s.manual_off_until && (modeKey === 'solar' || modeKey === 'gentle')) {
+    const until = new Date(s.manual_off_until * 1000);
+    const hh = String(until.getHours()).padStart(2, '0');
+    const mm = String(until.getMinutes()).padStart(2, '0');
+    modeDesc = `Ručně vypnuto · automatika pozastavena do ${hh}:${mm}`;
+  }
+
   card.className = 'mode-card mode-' + modeKey;
   icon.textContent = modeIcon;
   title.textContent = modeTitle;
@@ -5005,6 +5078,7 @@ function renderCurrentModeCard(s) {
   document.getElementById('sceneAutoBtn').classList.toggle('active', modeKey === 'solar');
   document.getElementById('sceneGentleBtn').classList.toggle('active', modeKey === 'gentle');
   document.getElementById('sceneHeatBtn').classList.toggle('active', modeKey === 'heat');
+  document.getElementById('sceneOffBtn').classList.toggle('active', modeKey === 'off');
 }
 
 // ===== v3.7.3 NEW: Scheduler status bar (v3.7.4: schovat pokud paused) =====
@@ -5186,6 +5260,7 @@ function renderControl(s) {
   setBtn('sceneAutoBtn', s.current_scene === 'solar_auto' && !s.override_active, 'active');
   setBtn('sceneGentleBtn', s.current_scene === 'gentle', 'active');
   setBtn('sceneHeatBtn', s.current_scene === 'heat_now' || s.override_active, 'active');
+  setBtn('sceneOffBtn', s.current_scene === 'off', 'active');
 }
 
 function renderChart(ticks) {
@@ -5243,7 +5318,7 @@ function renderEngineStatus(es) {
   }
   let sceneBadge = '';
   if (st.current_scene && st.current_scene !== 'solar_auto') {
-    const sceneNames = { heat_now: '♨ Ohřát hned', gentle: '🌱 Mírný režim', solar_auto: '☀ Solar auto' };
+    const sceneNames = { heat_now: '♨ Ohřát hned', gentle: '🌱 Mírný režim', solar_auto: '☀ Solar auto', off: '⏻ Vypnuto' };
     sceneBadge = '<div style="margin-top: 6px; font-family: var(--mono); font-size: 10px; color: var(--text-muted);">scéna: ' + (sceneNames[st.current_scene] || st.current_scene) + '</div>';
   }
 

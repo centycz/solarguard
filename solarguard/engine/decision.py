@@ -67,6 +67,12 @@ class SpaConfig:
     bat_full_kickstart_enabled: bool = True
     bat_full_kickstart_min_pv_w: float = 500    # FVE jeste neco vyrabi (tedy svit slunce)
     bat_full_kickstart_min_load_w: float = 500  # dum ma rozumny odber (= FVE umi nahodit)
+    # NEW v4.4.0: auto-expirace heat_now - aby override nezustal aktivni do nekonecna
+    # (drzet 38C pres noc z baterky). Konci drive z:
+    #   a) heat_now_max_hours od aktivace, nebo
+    #   b) heat_now_linger_min po prvnim dosazeni cilove teploty
+    heat_now_max_hours: float = 8.0
+    heat_now_linger_min: int = 120
 
 
 @dataclass
@@ -294,15 +300,56 @@ class DecisionEngine:
         return (on_w, off_w)
 
     def decide(self, ctx: SystemContext) -> Decision:
-        if ctx.override_active:
-            return Decision(ctx.current_state,
-                reason=f"override: {ctx.override_reason}")
-
         v = ctx.victron
         s = ctx.spa
         e = ctx.env
         plan = ctx.plan
         now = time.time()
+
+        if ctx.override_active:
+            # v4.4.0 NEW: auto-expirace heat_now (jine overridy, napr. preshower,
+            # si svuj lifecycle ridi samy - tech se expirace netyka)
+            if ctx.current_scene == "heat_now":
+                expired = None
+                if ctx.override_started_at > 0 \
+                        and (now - ctx.override_started_at) > self.cfg.heat_now_max_hours * 3600:
+                    expired = f"bezel {self.cfg.heat_now_max_hours:.0f}h"
+                target = self._effective_target(ctx)
+                if s.current_temp_c is not None and s.current_temp_c >= target \
+                        and ctx.heat_now_target_reached_at == 0:
+                    # one-way latch - dosazeni cile si zapamatujeme, dipy pod cil neresetuji
+                    ctx.heat_now_target_reached_at = now
+                if ctx.heat_now_target_reached_at > 0 \
+                        and (now - ctx.heat_now_target_reached_at) > self.cfg.heat_now_linger_min * 60:
+                    expired = f"cil {target:.0f}C dosazen pred {self.cfg.heat_now_linger_min} min"
+                if expired:
+                    ctx.override_active = False
+                    ctx.override_reason = ""
+                    ctx.current_scene = "solar_auto"
+                    ctx.target_temp_override = None
+                    ctx.override_started_at = 0.0
+                    ctx.heat_now_target_reached_at = 0.0
+                    ctx.manual_heater_started_at = 0.0
+                    return Decision(SystemState.IDLE, set_heater=False,
+                        reason=f"heat_now auto-konec ({expired}) -> solar auto")
+            return Decision(ctx.current_state,
+                reason=f"override: {ctx.override_reason}")
+
+        # v4.4.0 NEW: scena Vypnuto - zadna automatika, dokud uzivatel neprepne
+        if ctx.current_scene == "off":
+            if s.heater_on:
+                return Decision(SystemState.IDLE, set_heater=False,
+                    reason="scena Vypnuto: vypinam topeni")
+            return Decision(SystemState.IDLE, reason="scena Vypnuto: automatika neaktivni")
+
+        # v4.4.0 NEW: rucni vypnuti topeni = docasny hold automatiky
+        if ctx.manual_heater_off_until > now:
+            rem_min = int((ctx.manual_heater_off_until - now) / 60) + 1
+            if s.heater_on:
+                return Decision(SystemState.IDLE, set_heater=False,
+                    reason=f"rucni vypnuti: automatika pozastavena jeste {rem_min} min")
+            return Decision(SystemState.IDLE,
+                reason=f"rucni vypnuti: automatika pozastavena jeste {rem_min} min")
 
         # 1) STALE / OFFLINE / ERROR
         if v.is_stale:

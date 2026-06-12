@@ -556,6 +556,92 @@ def test_override():
           expect_reason_contains="override")
 
 
+def test_manual_off():
+    """v4.4.0: Rucni vypnuti + scena Vypnuto - automatika nesmi zapnout topeni."""
+    print(f"\n{BOLD}{BLUE}═══ MANUAL OFF / SCENA VYPNUTO ═══{RESET}")
+
+    # Scena off - velky prebytek, presto se nesmi topit
+    ctx = make_ctx(soc=85, surplus=3000, state=SystemState.IDLE)
+    ctx.current_scene = "off"
+    check("Scena Vypnuto: surplus 3000W ale topeni se NEzapne", "MANUAL_OFF",
+          ctx, expect_state=SystemState.IDLE, expect_heater="any",
+          expect_reason_contains="Vypnuto")
+
+    # Scena off - heater jeste bezi (napr. zapnuty fyzicky) -> aktivne vypnout
+    ctx = make_ctx(soc=85, surplus=3000, state=SystemState.IDLE, heater_on=True)
+    ctx.current_scene = "off"
+    check("Scena Vypnuto: heater_on=True -> aktivne vypnout", "MANUAL_OFF",
+          ctx, expect_state=SystemState.IDLE, expect_heater=False)
+
+    # Manual-off hold aktivni - prebytek je, ale automatika je pozastavena
+    ctx = make_ctx(soc=85, surplus=3000, state=SystemState.IDLE)
+    ctx.manual_heater_off_until = time.time() + 3600
+    check("Manual OFF hold: surplus 3000W ale automatika pozastavena", "MANUAL_OFF",
+          ctx, expect_state=SystemState.IDLE, expect_heater="any",
+          expect_reason_contains="rucni vypnuti")
+
+    # Hold vyprsel - normalni chovani (zapne pri prebytku)
+    ctx = make_ctx(soc=85, surplus=3000, state=SystemState.IDLE)
+    ctx.manual_heater_off_until = time.time() - 10
+    check("Manual OFF hold vyprsel -> normalne zapne pri prebytku", "MANUAL_OFF",
+          ctx, expect_state=SystemState.HEATING, expect_heater=True)
+
+
+def test_heat_now_expiry():
+    """v4.4.0: heat_now override expiruje sam (max hours / linger po cili)."""
+    print(f"\n{BOLD}{BLUE}═══ HEAT_NOW AUTO-EXPIRACE ═══{RESET}")
+
+    # heat_now cerstvy - zustava aktivni
+    ctx = make_ctx(soc=85, surplus=0, override=True,
+                   state=SystemState.HEATING, heater_on=True, water_temp=30)
+    ctx.current_scene = "heat_now"
+    ctx.override_started_at = time.time() - 600  # 10 min
+    check("heat_now 10 min stary, voda 30C -> override drzi", "HEAT_NOW_EXP",
+          ctx, expect_state=SystemState.HEATING,
+          expect_reason_contains="override")
+
+    # heat_now prekrocil max hours -> expirace
+    ctx = make_ctx(soc=85, surplus=0, override=True,
+                   state=SystemState.HEATING, heater_on=True, water_temp=30)
+    ctx.current_scene = "heat_now"
+    ctx.override_started_at = time.time() - 9 * 3600  # 9h > 8h max
+    check("heat_now bezi 9h (max 8h) -> auto-konec, topeni OFF", "HEAT_NOW_EXP",
+          ctx, expect_state=SystemState.IDLE, expect_heater=False,
+          expect_reason_contains="auto-konec")
+
+    # heat_now: cil dosazen pred 3h (linger 2h) -> expirace
+    ctx = make_ctx(soc=85, surplus=0, override=True,
+                   state=SystemState.HEATING, heater_on=True, water_temp=38)
+    ctx.current_scene = "heat_now"
+    ctx.override_started_at = time.time() - 4 * 3600
+    ctx.heat_now_target_reached_at = time.time() - 3 * 3600  # 3h > 2h linger
+    check("heat_now: cil dosazen pred 3h (linger 2h) -> auto-konec", "HEAT_NOW_EXP",
+          ctx, expect_state=SystemState.IDLE, expect_heater=False,
+          expect_reason_contains="auto-konec")
+
+    # heat_now: cil prave dosazen -> latch se nastavi, ale jeste neexpiruje
+    ctx = make_ctx(soc=85, surplus=0, override=True,
+                   state=SystemState.HEATING, heater_on=True, water_temp=38)
+    ctx.current_scene = "heat_now"
+    ctx.override_started_at = time.time() - 3600
+    res = check("heat_now: cil prave dosazen -> jeste drzi (linger bezi)", "HEAT_NOW_EXP",
+          ctx, expect_state=SystemState.HEATING,
+          expect_reason_contains="override")
+    if ctx.heat_now_target_reached_at == 0:
+        res.passed = False
+        res.note += " | heat_now_target_reached_at se nenastavil (latch)"
+
+    # Jiny override (preshower) - expirace heat_now se NEsmi uplatnit
+    ctx = make_ctx(soc=85, surplus=0, override=True,
+                   state=SystemState.HEATING, heater_on=True, water_temp=38)
+    ctx.current_scene = "solar_auto"  # preshower nemeni scenu
+    ctx.override_reason = "preshower: ready @ 19:30"
+    ctx.override_started_at = time.time() - 9 * 3600
+    check("preshower override 9h -> heat_now expirace se netyka", "HEAT_NOW_EXP",
+          ctx, expect_state=SystemState.HEATING,
+          expect_reason_contains="override")
+
+
 def test_night():
     """NIGHT_OFF - po setmeni topeni vypnuto."""
     print(f"\n{BOLD}{BLUE}═══ NIGHT_OFF ═══{RESET}")
@@ -589,6 +675,8 @@ def run_all():
     test_battery_full()
     test_glitch()
     test_override()
+    test_manual_off()
+    test_heat_now_expiry()
     test_night()
 
     # Souhrn

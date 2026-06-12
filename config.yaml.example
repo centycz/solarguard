@@ -68,6 +68,9 @@ spa:
   bat_full_kickstart_enabled: true
   bat_full_kickstart_min_pv_w: 500
   bat_full_kickstart_min_load_w: 500
+  manual_off_hold_min: 240    # v4.4.0: po rucnim OFF pauza automatiky (minuty)
+  heat_now_max_hours: 8       # v4.4.0: heat_now auto-konec po X hodinach
+  heat_now_linger_min: 120    # v4.4.0: heat_now auto-konec X minut po dosazeni cile
   off_stability_window_sec: 60
   phase_max_continuous_w: 3500
   spa_phase_label: "L2"      # na ktere fazi je virivka (L1/L2/L3)

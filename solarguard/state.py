@@ -447,6 +447,17 @@ class SystemContext:
     # (ignoruje vlastni startup po dobu spike_ignore_window_sec).
     manual_heater_started_at: float = 0.0
 
+    # v4.4.0 NEW: rucni vypnuti topeni = docasny hold automatiky.
+    # Dokud time.time() < manual_heater_off_until, engine sam nezapne topeni.
+    # Vyprsi samo, nebo ho zrusi vyber sceny / rucni zapnuti topeni.
+    manual_heater_off_until: float = 0.0
+
+    # v4.4.0 NEW: auto-expirace heat_now overridu.
+    # override_started_at = kdy byl heat_now aktivovan (web/schedule)
+    # heat_now_target_reached_at = kdy voda poprve dosahla cile (one-way latch)
+    override_started_at: float = 0.0
+    heat_now_target_reached_at: float = 0.0
+
     load_history: Deque[tuple] = field(default_factory=lambda: deque(maxlen=120))
     surplus_history: Deque[tuple] = field(default_factory=lambda: deque(maxlen=180))
     # v3.4 NEW: per-phase load history pro presnejsi spike detection
